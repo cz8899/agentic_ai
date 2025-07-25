@@ -24,4 +24,5 @@ jobs:
       - name: Run pytest
         run: |
           export PYTHONPATH="${{ github.workspace }}:$PYTHONPATH"
-          pytest tests/core/test_hybrid_rag_router.py -v
+          pytest -v --maxfail=12 --disable-warnings --tb=short tests/core/test_hybrid_rag_router.py
+
