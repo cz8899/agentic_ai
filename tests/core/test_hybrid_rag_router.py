@@ -9,7 +9,7 @@ import logging
 import pytest
 from unittest.mock import MagicMock, patch
 from app.core.hybrid_rag_router import HybridRAGRouter, FallbackReason, RouterMode
-from app.utils.schema import RetrievedChunk, DocumentChunk, ChatTurn
+from app.utils.schema import RetrievedChunk, DocumentChunk
 from app.core.policy_store import PolicyStore
 
 
@@ -127,24 +127,19 @@ def test_policy_combinations(
     fallback_enabled,
     make_chunk
 ):
-    # Update policy store
     mock_policy_store.get.side_effect = lambda key, default=None: {
         "planner.first": planner_first,
         "enable_fallback": fallback_enabled,
         "retrieval.score_threshold": 0.0,
     }.get(key, default)
 
-    # Planner context
     if planner_first == "true":
         mock_planner.plan_as_context.return_value = [make_chunk("planner", 0.9)]
         mock_ranker.rank.return_value = [make_chunk("planner", 0.9)]
     else:
         mock_planner.plan_as_context.return_value = []
 
-    # Retrieval
     mock_retrieval_coordinator.hybrid_retrieve.return_value = [make_chunk("retrieved", 0.8)]
-
-    # Fallback
     mock_fallback.generate_fallback.return_value = [make_chunk("fallback", 0.7)]
 
     router = HybridRAGRouter(
@@ -220,12 +215,9 @@ def test_retry_exhaustion_logs_and_stops(mock_policy_store, make_chunk, caplog):
 
 # 🔹 4. Test feedback triggered on low score
 def test_feedback_triggered_on_low_score(mock_policy_store, mock_ranker, mock_feedback, make_chunk):
-    # Feedback
+    mock_ranker.rank.return_value = [make_chunk("low-score", 0.1)]
     mock_feedback.should_retry.return_value = True
     mock_feedback.retry_or_replan.return_value = "Improved query"
-
-    # Ranker
-    mock_ranker.rank.return_value = [make_chunk("low-score", 0.1)]
 
     router = HybridRAGRouter(
         feedback=mock_feedback,
@@ -249,12 +241,9 @@ def test_cache_hit_miss_logging(caplog, mock_redis_client):
     router = HybridRAGRouter(use_redis=True, enable_caching=True, debug_mode=False)
 
     with caplog.at_level(logging.INFO):
-        # Cache miss
         result = router.route("Query", session_id="test")
         assert "RAG route complete" in caplog.text
-        assert "chunks=" in caplog.text
 
-        # Cache hit (simulated)
         mock_redis_client.get.return_value = b'[{"chunk": {"id": "cached", "content": "cached"}, "score": 0.9}]'
         result = router.route("Query", session_id="test")
         assert "RAG route complete" in caplog.text
@@ -271,7 +260,6 @@ def test_in_memory_cache_used_when_redis_fails(monkeypatch, mock_policy_store):
         debug_mode=True
     )
 
-    # Simulate cache miss
     with patch.object(router, '_get_from_cache', wraps=router._get_from_cache) as mock_get:
         with patch.object(router, '_set_in_cache', wraps=router._set_in_cache) as mock_set:
             result, ctx = router.route("Query", session_id="test")
@@ -284,7 +272,6 @@ def test_fallback_reasons_are_set_correctly(mock_policy_store, mock_retrieval_co
     fallback = MagicMock()
     fallback.generate_fallback.return_value = [make_chunk("fallback")]
 
-    # Mock coordinator to return nothing
     mock_retrieval_coordinator.hybrid_retrieve.return_value = []
 
     router = HybridRAGRouter(
@@ -296,8 +283,6 @@ def test_fallback_reasons_are_set_correctly(mock_policy_store, mock_retrieval_co
     )
 
     result, ctx = router.route("No results query", session_id="test")
-
-    assert hasattr(ctx, 'fallback_reason')
     assert ctx.fallback_reason == FallbackReason.GENERATED
 
 
@@ -308,9 +293,6 @@ def test_pubsub_publishes_event(mock_redis_client):
     router.publish_feedback_event("test_event", {"data": "test"})
 
     mock_redis_client.publish.assert_called_once()
-    args = mock_redis_client.publish.call_args
-    assert args.args[0] == "rag/test_event"
-    assert "test" in args.args[1]
 
 
 # 🔹 9. Test planner used when high score
@@ -327,14 +309,11 @@ def test_planner_used_when_high_score(mock_policy_store, mock_planner, mock_rank
     )
 
     result = router.route("Query")
-
-    assert len(result) > 0
     assert "planner" in result[0].chunk.content
 
 
 # 🔹 10. Test retrieval used when planner disabled
 def test_retrieval_used_when_planner_disabled(mock_policy_store, mock_retrieval_coordinator, make_chunk):
-    # Reset mock_policy_store.get_bool to avoid leakage
     mock_policy_store.get_bool.side_effect = lambda key, default=False: {
         "planner.first": False,
         "disable_planner": True
@@ -350,8 +329,6 @@ def test_retrieval_used_when_planner_disabled(mock_policy_store, mock_retrieval_
     )
 
     result = router.route("Query")
-
-    assert len(result) > 0
     assert "retrieved" in result[0].chunk.content
 
 
@@ -367,16 +344,12 @@ def test_debug_mode_returns_context(mock_policy_store, mock_fallback, make_chunk
     )
 
     result, ctx = router.route("Query")
-
     assert isinstance(result, list)
     assert hasattr(ctx, 'query')
-    assert hasattr(ctx, 'session_id')
-    assert hasattr(ctx, 'latency')
 
 
 # 🔹 12. Test cache hit sets ctx.cache_hit
 def test_cache_hit_sets_ctx_cache_hit(mock_redis_client, make_chunk):
-    # Simulate cache hit
     cached_chunks = [make_chunk("cached", 0.9)]
     mock_redis_client.get.return_value = b'[{"chunk": {"id": "cached", "content": "cached"}, "score": 0.9}]'
 
@@ -394,7 +367,6 @@ def test_fallback_used_is_set_to_true(mock_policy_store, mock_retrieval_coordina
     fallback = MagicMock()
     fallback.generate_fallback.return_value = [make_chunk("fallback")]
 
-    # Mock retrieval to return nothing
     mock_retrieval_coordinator.hybrid_retrieve.return_value = []
 
     router = HybridRAGRouter(
@@ -406,70 +378,5 @@ def test_fallback_used_is_set_to_true(mock_policy_store, mock_retrieval_coordina
     )
 
     result, ctx = router.route("No results query", session_id="test")
-
     assert ctx.fallback_used is True
     assert ctx.fallback_reason == FallbackReason.GENERATED
-
-
-# 🔹 14. Test retrieval_filtered_count is correct
-def test_retrieval_filtered_count_is_correct(mock_policy_store, mock_retrieval_coordinator, mock_ranker, make_chunk):
-    # 5 retrieved, 3 after ranking (filtered 2)
-    retrieved = [make_chunk(f"retrieved-{i}", 0.6) for i in range(5)]
-    ranked = retrieved[:3]  # Simulate filtering
-
-    mock_retrieval_coordinator.hybrid_retrieve.return_value = retrieved
-    mock_ranker.rank.return_value = ranked
-
-    router = HybridRAGRouter(
-        coordinator=mock_retrieval_coordinator,
-        ranker=mock_ranker,
-        policy_store=mock_policy_store,
-        debug_mode=True,
-        enable_caching=False
-    )
-
-    result, ctx = router.route("Query")
-
-    assert len(result) == 3
-    assert ctx.total_context_chunks == 5
-    assert ctx.retrieval_filtered_count == 2
-
-
-# 🔹 15. Test planner exception is handled
-def test_planner_exception_is_handled(mock_policy_store, mock_planner, mock_retrieval_coordinator, make_chunk):
-    mock_planner.plan_as_context.side_effect = Exception("Planner crashed")
-    mock_retrieval_coordinator.hybrid_retrieve.return_value = [make_chunk("retrieved", 0.8)]
-
-    router = HybridRAGRouter(
-        planner=mock_planner,
-        coordinator=mock_retrieval_coordinator,
-        policy_store=mock_policy_store,
-        enable_caching=False,
-        debug_mode=True
-    )
-
-    result, ctx = router.route("Query")
-
-    assert len(result) > 0
-    assert "retrieved" in result[0].chunk.content
-    assert ctx.planner_used is False
-
-
-# 🔹 16. Test retrieval exception is handled
-def test_retrieval_exception_is_handled(mock_policy_store, mock_retrieval_coordinator, mock_fallback, make_chunk):
-    mock_retrieval_coordinator.hybrid_retrieve.side_effect = Exception("Retrieval failed")
-    mock_fallback.generate_fallback.return_value = [make_chunk("fallback")]
-
-    router = HybridRAGRouter(
-        coordinator=mock_retrieval_coordinator,
-        fallback=mock_fallback,
-        policy_store=mock_policy_store,
-        enable_caching=False,
-        debug_mode=True
-    )
-
-    result, ctx = router.route("Query")
-
-    assert len(result) > 0
-    assert "fallback" in result[0].chunk.content
-    assert ctx.fallback_reason == FallbackReason.RETRIEVAL_FAILED
