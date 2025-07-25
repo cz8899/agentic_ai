@@ -245,135 +245,148 @@ class HybridRAGRouter:
         self._in_memory_cache[key] = (chunks, time.time())
         logger.debug(f"In-memory cache set: {key}")
 
-    @trace_function
-    def route(
-        self,
-        query: str,
-        session_id: str = "default",
-        retry_depth: int = 0
-    ) -> Union[List[RetrievedChunk], Tuple[List[RetrievedChunk], RoutingContext]]:
-        start = time.time()
-        ctx = RoutingContext(
-            query=query,
-            session_id=session_id,
-            retry_depth=retry_depth,
-            max_retry_depth=self.max_retry_depth
-        )
+@trace_function
+def route(
+    self,
+    query: str,
+    session_id: str = "default",
+    retry_depth: int = 0
+) -> Union[List[RetrievedChunk], Tuple[List[RetrievedChunk], RoutingContext]]:
+    start = time.time()
+    ctx = RoutingContext(
+        query=query,
+        session_id=session_id,
+        retry_depth=retry_depth,
+        max_retry_depth=self.max_retry_depth
+    )
 
-        # === Caching: Check early ===
-        if self.enable_caching and retry_depth == 0 and not self.skip_cache:
-            policy_snapshot = self._fetch_policies()
-            cache_key = self._cache_key(query, session_id, str(policy_snapshot))
-            cached = self._get_from_cache(cache_key, ctx)
-            if cached:
-                ctx.fallback_reason = FallbackReason.CACHE_HIT
-                ctx.mode = RouterMode.RETRIEVAL
-                ctx.latency = time.time() - start
-                return self._return(cached, ctx)
+    # === Caching: Check early ===
+    policy_snapshot = self._fetch_policies()
+    cache_key = self._cache_key(query, session_id, str(policy_snapshot))
+    if self.enable_caching and retry_depth == 0 and not self.skip_cache:
+        cached = self._get_from_cache(cache_key, ctx)
+        if cached:
+            ctx.fallback_reason = FallbackReason.CACHE_HIT
+            ctx.mode = RouterMode.RETRIEVAL
+            ctx.final_chunk_count = len(cached)
+            ctx.latency = time.time() - start
+            return self._return(cached, ctx)
 
-        # === Planner First ===
-        try:
-            if self.enable_planner_first and not self.disable_planner and self.planner:
-                planner_context = self.planner.plan_as_context(query)
-                if planner_context and self.ranker:
-                    ranked = self.ranker.rank(query, planner_context)
-                    if ranked and ranked[0].score >= self.retrieval_score_threshold:
-                        ctx.planner_used = True
-                        ctx.total_context_chunks = len(planner_context)
-                        ctx.retrieval_filtered_count = len(planner_context) - len(ranked)
-                        ctx.final_chunk_count = len(ranked)
-                        ctx.rank_source = "planner"
-                        ctx.planner_score = ranked[0].score
-                        ctx.mode = RouterMode.PLANNER
-                        return self._return(ranked, ctx)
-                    else:
-                        logger.info("Planner returned only low/no-score chunks.")
-                        ctx.planner_score = ranked[0].score if ranked else 0.0
+    # === Planner First ===
+    try:
+        if self.enable_planner_first and not self.disable_planner and self.planner:
+            planner_context = self.planner.plan_as_context(query)
+            if planner_context and self.ranker:
+                ranked = self.ranker.rank(query, planner_context)
+                if ranked and ranked[0].score >= self.retrieval_score_threshold:
+                    ctx.planner_used = True
+                    ctx.total_context_chunks = len(planner_context)
+                    ctx.retrieval_filtered_count = len(planner_context) - len(ranked)
+                    ctx.final_chunk_count = len(ranked)
+                    ctx.rank_source = "planner"
+                    ctx.planner_score = ranked[0].score
+                    ctx.mode = RouterMode.PLANNER
+                    ctx.latency = time.time() - start
+                    return self._return(ranked, ctx)
                 else:
-                    logger.info("Planner returned no chunks.")
+                    ctx.planner_score = ranked[0].score if ranked else 0.0
+                    logger.info("Planner returned low-score or no chunks.")
             else:
-                logger.info("Planner skipped (disabled or planner.first=false).")
-        except Exception as e:
-            logger.warning(f"Planner failed: {e}")
-            ctx.fallback_reason = FallbackReason.PLANNER_LOW_SCORE
+                logger.info("Planner returned no chunks.")
+        else:
+            logger.info("Planner skipped (disabled or planner.first=false).")
+    except Exception as e:
+        logger.warning(f"Planner failed: {e}")
+        ctx.fallback_reason = FallbackReason.PLANNER_LOW_SCORE
 
-        # === Hybrid Retrieval ===
-        retrieved_chunks = []
-        retrieval_sources = []
+    # === Hybrid Retrieval ===
+    retrieved_chunks = []
+    retrieval_sources = []
+    try:
+        payload = self._build_payload(query, policy_snapshot)
+        raw = self.retrieval_coordinator.hybrid_retrieve(payload)
+        if isinstance(raw, list):
+            retrieved_chunks = raw
+            retrieval_sources = [
+                c.chunk.metadata.get("retrieval_source", "unknown")
+                for c in raw if c and hasattr(c, 'chunk')
+            ]
+        else:
+            logger.error("hybrid_retrieve did not return a list")
+    except Exception as e:
+        logger.error(f"Retrieval failed: {e}")
+        ctx.fallback_reason = FallbackReason.RETRIEVAL_FAILED
+
+    # === Ranking ===
+    ranked = retrieved_chunks
+    if self.enable_rerank and retrieved_chunks and self.ranker:
         try:
-            payload = self._build_payload(query, self._fetch_policies())
-            raw = self.retrieval_coordinator.hybrid_retrieve(payload)
-            if raw is None:
-                logger.error("hybrid_retrieve returned None")
-            elif not isinstance(raw, list):
-                logger.error("hybrid_retrieve did not return a list")
-            else:
-                retrieved_chunks = raw
-                retrieval_sources = [c.chunk.metadata.get("retrieval_source", "unknown") for c in raw]
-        except Exception as e:
-            logger.error(f"Retrieval failed: {e}")
-            ctx.fallback_reason = FallbackReason.RETRIEVAL_FAILED
-
-        # === Ranking ===
-        ranked = retrieved_chunks
-        if self.enable_rerank and retrieved_chunks and self.ranker:
             ranked = self.ranker.rank(query, retrieved_chunks)
             ctx.rerank_performed = True
-        ctx.retrieval_used = True
-        ctx.total_context_chunks = len(retrieved_chunks)
-        ctx.retrieval_filtered_count = len(retrieved_chunks) - len(ranked)
-        ctx.retrieval_sources = list(set(retrieval_sources))
+        except Exception as e:
+            logger.warning(f"Reranking failed: {e}")
+            ranked = retrieved_chunks  # fallback to unranked
 
-        # === Feedback Loop ===
-        if self.enable_feedback and self.feedback and ranked:
-            if all(c.score < self.retrieval_score_threshold for c in ranked):
-                if retry_depth >= self.max_retry_depth:
-                    logger.warning("Max retry depth (%d) reached. Skipping feedback retry.", self.max_retry_depth)
-                    ctx.fallback_reason = FallbackReason.RETRY_EXHAUSTED
-                else:
-                    retry_query = self.feedback.retry_or_replan(query, ranked)
-                    if retry_query and retry_query != query:
-                        logger.info("Feedback retry with new query: '%s'", retry_query)
-                        ctx.feedback_retry = True
-                        ctx.latency = time.time() - start
-                        return self.route(query=retry_query, session_id=session_id, retry_depth=retry_depth + 1)
+    ctx.retrieval_used = True
+    ctx.total_context_chunks = len(retrieved_chunks)
+    ctx.retrieval_filtered_count = len(retrieved_chunks) - len(ranked)
+    ctx.retrieval_sources = list(set(retrieval_sources))
 
-        # === Fallback ===
-        if not ranked:
-            ctx.fallback_used = True
+    # === Feedback Loop ===
+    if self.enable_feedback and self.feedback and ranked:
+        if all(c.score < self.retrieval_score_threshold for c in ranked):
+            if retry_depth >= self.max_retry_depth:
+                logger.warning("Max retry depth (%d) reached. Skipping feedback retry.", self.max_retry_depth)
+                ctx.fallback_reason = FallbackReason.RETRY_EXHAUSTED
+            else:
+                retry_query = self.feedback.retry_or_replan(query, ranked)
+                if retry_query and retry_query != query:
+                    logger.info("Feedback retry triggered: '%s'", retry_query)
+                    ctx.feedback_retry = True
+                    ctx.latency = time.time() - start
+                    reranked_result, reranked_ctx = self.route(
+                        query=retry_query,
+                        session_id=session_id,
+                        retry_depth=retry_depth + 1
+                    )
+                    return self._return(reranked_result, reranked_ctx)
+
+    # === Fallback if needed ===
+    if not ranked:
+        ctx.fallback_used = True
+        ctx.mode = RouterMode.FALLBACK
+        try:
             if self.fallback:
-                try:
-                    fallback_result = self.fallback.generate_fallback(query)
-                    ctx.fallback_reason = FallbackReason.GENERATED
-                    ctx.final_chunk_count = len(fallback_result)
-                    ctx.mode = RouterMode.FALLBACK
-                    return self._return(fallback_result or [], ctx)
-                except Exception as e:
-                    logger.error(f"Fallback failed: {e}")
-                    ctx.fallback_reason = FallbackReason.UNKNOWN
+                fallback_result = self.fallback.generate_fallback(query)
+                ctx.fallback_reason = FallbackReason.GENERATED
+                ctx.final_chunk_count = len(fallback_result or [])
+                ctx.latency = time.time() - start
+                return self._return(fallback_result or [], ctx)
             else:
                 ctx.fallback_reason = FallbackReason.UNKNOWN
-
-        ctx.mode = RouterMode.RETRIEVAL
-        ctx.final_chunk_count = len(ranked)
+        except Exception as e:
+            logger.error(f"Fallback failed: {e}")
+            ctx.fallback_reason = FallbackReason.UNKNOWN
+        ctx.final_chunk_count = 0
         ctx.latency = time.time() - start
+        return self._return([], ctx)
 
-        # === Cache Result ===
-        if self.enable_caching and retry_depth == 0 and not self.skip_cache:
-            policy_snapshot = self._fetch_policies()
-            cache_key = self._cache_key(query, session_id, str(policy_snapshot))
-            self._set_in_cache(cache_key, ranked)
+    # === Cache the result ===
+    if self.enable_caching and retry_depth == 0 and not self.skip_cache:
+        self._set_in_cache(cache_key, ranked)
 
-        # === Log Final Result ===
-        logger.info(
-            f"RAG route complete| "
-            f"sess={ctx.session_id} retry={ctx.retry_depth}/{ctx.max_retry_depth}| "
-            f"q='{ctx.query[:40]}{'...' if len(ctx.query) > 40 else ''}'| "
-            f"P={ctx.planner_used} R={ctx.retrieval_used} F={ctx.fallback_used} "
-            f"reason={ctx.fallback_reason} chunks={ctx.final_chunk_count} took={ctx.latency:.3f}s"
-        )
+    ctx.mode = RouterMode.RETRIEVAL
+    ctx.final_chunk_count = len(ranked)
+    ctx.latency = time.time() - start
 
-        return self._return(ranked, ctx)
+    logger.info(
+        f"RAG route complete| sess={ctx.session_id} retry={ctx.retry_depth}/{ctx.max_retry_depth}| "
+        f"q='{ctx.query[:40]}{'...' if len(ctx.query) > 40 else ''}'| "
+        f"P={ctx.planner_used} R={ctx.retrieval_used} F={ctx.fallback_used} "
+        f"reason={ctx.fallback_reason} chunks={ctx.final_chunk_count} took={ctx.latency:.3f}s"
+    )
+
+    return self._return(ranked, ctx)
 
     def _return(self, result: List[RetrievedChunk], ctx: RoutingContext) -> Union[List[RetrievedChunk], Tuple[List[RetrievedChunk], RoutingContext]]:
         if self.debug_mode:
