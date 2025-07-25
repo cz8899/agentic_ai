@@ -178,7 +178,7 @@ class HybridRAGRouter:
             for c in chunks
         ])
 
-    def _deserialize(self, data: str) -> List[RetrievedChunk]:
+    def _deserialize(self,  str) -> List[RetrievedChunk]:
         try:
             raw = json.loads(data)
             return [
@@ -200,7 +200,7 @@ class HybridRAGRouter:
     def _get_from_cache(self, key: str, ctx: RoutingContext) -> Optional[List[RetrievedChunk]]:
         if not self.enable_caching or self.skip_cache:
             return None
-        result = None
+
         if self.redis_client:
             try:
                 data = self.redis_client.get(key)
@@ -209,24 +209,22 @@ class HybridRAGRouter:
                     if result:
                         ctx.cache_hit = True
                         logger.info(f"Cache hit (Redis): {key}")
-                    else:
-                        logger.info(f"Cache miss (Redis): {key}")
-                else:
-                    logger.info(f"Cache miss (Redis): {key}")
+                        return result
             except Exception as e:
-                logger.warning(f"Redis GET failed: {e}. Trying in-memory fallback.")
-        if not result and key in self._in_memory_cache:
-            cached_result, timestamp = self._in_memory_cache[key]
+                logger.warning(f"Redis GET failed: {e}")
+
+        if key in self._in_memory_cache:
+            chunks, timestamp = self._in_memory_cache[key]
             if (time.time() - timestamp) < self.cache_ttl:
-                result = cached_result
                 ctx.cache_hit = True
                 logger.info(f"Cache hit (in-memory): {key}")
+                return chunks
             else:
                 del self._in_memory_cache[key]
                 logger.info(f"Cache miss (in-memory, expired): {key}")
-        elif not result:
-            logger.info(f"Cache miss (in-memory): {key}")
-        return result
+
+        logger.info(f"Cache miss: {key}")
+        return None
 
     def _set_in_cache(self, key: str, chunks: List[RetrievedChunk]):
         if not self.enable_caching or self.skip_cache:
@@ -235,13 +233,17 @@ class HybridRAGRouter:
             serialized = self._serialize(chunks)
         except Exception:
             return
+
         if self.redis_client:
             try:
                 self.redis_client.setex(key, self.cache_ttl, serialized)
+                logger.debug(f"Redis cache set with TTL={self.cache_ttl}: {key}")
                 return
             except Exception as e:
                 logger.warning(f"Redis SETEX failed: {e}")
+
         self._in_memory_cache[key] = (chunks, time.time())
+        logger.debug(f"In-memory cache set: {key}")
 
     @trace_function
     def route(
@@ -257,6 +259,8 @@ class HybridRAGRouter:
             retry_depth=retry_depth,
             max_retry_depth=self.max_retry_depth
         )
+
+        # === Caching: Check early ===
         policy_snapshot = self._fetch_policies()
         cache_key = self._cache_key(query, session_id, str(policy_snapshot))
         if self.enable_caching and retry_depth == 0 and not self.skip_cache:
@@ -267,6 +271,8 @@ class HybridRAGRouter:
                 ctx.final_chunk_count = len(cached)
                 ctx.latency = time.time() - start
                 return self._return(cached, ctx)
+
+        # === Planner First ===
         try:
             if self.enable_planner_first and not self.disable_planner and self.planner:
                 planner_context = self.planner.plan_as_context(query)
@@ -292,21 +298,25 @@ class HybridRAGRouter:
         except Exception as e:
             logger.warning(f"Planner failed: {e}")
             ctx.fallback_reason = FallbackReason.PLANNER_LOW_SCORE
+            ctx.fallback_used = True
+
+        # === Hybrid Retrieval ===
         retrieved_chunks = []
         retrieval_sources = []
         try:
-            payload = self._build_payload(query, self._fetch_policies())
+            payload = self._build_payload(query, policy_snapshot)
             raw = self.retrieval_coordinator.hybrid_retrieve(payload)
-            if raw is None:
-                logger.error("hybrid_retrieve returned None")
-            elif not isinstance(raw, list):
-                logger.error("hybrid_retrieve did not return a list")
-            else:
+            if isinstance(raw, list):
                 retrieved_chunks = raw
                 retrieval_sources = [c.chunk.metadata.get("retrieval_source", "unknown") for c in raw]
+            else:
+                logger.error("hybrid_retrieve did not return a list")
         except Exception as e:
             logger.error(f"Retrieval failed: {e}")
             ctx.fallback_reason = FallbackReason.RETRIEVAL_FAILED
+            ctx.fallback_used = True
+
+        # === Ranking ===
         ranked = retrieved_chunks
         if self.enable_rerank and retrieved_chunks and self.ranker:
             try:
@@ -315,19 +325,22 @@ class HybridRAGRouter:
             except Exception as e:
                 logger.warning(f"Reranking failed: {e}")
                 ranked = retrieved_chunks
+
         ctx.retrieval_used = True
         ctx.total_context_chunks = len(retrieved_chunks)
         ctx.retrieval_filtered_count = len(retrieved_chunks) - len(ranked)
         ctx.retrieval_sources = list(set(retrieval_sources))
+
+        # === Feedback Loop ===
         if self.enable_feedback and self.feedback and ranked:
             if all(c.score < self.retrieval_score_threshold for c in ranked):
                 if retry_depth >= self.max_retry_depth:
-                    logger.warning("Max retry depth (%d) reached. Skipping feedback retry.", self.max_retry_depth)
+                    logger.warning(f"Max retry depth ({self.max_retry_depth}) reached. Skipping feedback retry.")
                     ctx.fallback_reason = FallbackReason.RETRY_EXHAUSTED
                 else:
                     retry_query = self.feedback.retry_or_replan(query, ranked)
                     if retry_query and retry_query != query:
-                        logger.info("Feedback retry triggered: '%s'", retry_query)
+                        logger.info(f"Feedback retry with new query: '{retry_query}'")
                         ctx.feedback_retry = True
                         ctx.latency = time.time() - start
                         reranked_result, reranked_ctx = self.route(
@@ -336,6 +349,8 @@ class HybridRAGRouter:
                             retry_depth=retry_depth + 1
                         )
                         return self._return(reranked_result, reranked_ctx)
+
+        # === Fallback if needed ===
         if not ranked:
             ctx.fallback_used = True
             ctx.mode = RouterMode.FALLBACK
@@ -354,11 +369,15 @@ class HybridRAGRouter:
             ctx.final_chunk_count = 0
             ctx.latency = time.time() - start
             return self._return([], ctx)
+
+        # === Cache the result ===
         if self.enable_caching and retry_depth == 0 and not self.skip_cache:
             self._set_in_cache(cache_key, ranked)
+
         ctx.mode = RouterMode.RETRIEVAL
         ctx.final_chunk_count = len(ranked)
         ctx.latency = time.time() - start
+
         logger.info(
             f"RAG route complete| "
             f"sess={ctx.session_id} retry={ctx.retry_depth}/{ctx.max_retry_depth}| "
@@ -366,6 +385,7 @@ class HybridRAGRouter:
             f"P={ctx.planner_used} R={ctx.retrieval_used} F={ctx.fallback_used} "
             f"reason={ctx.fallback_reason} chunks={ctx.final_chunk_count} took={ctx.latency:.3f}s"
         )
+
         return self._return(ranked, ctx)
 
     def _return(self, result: List[RetrievedChunk], ctx: RoutingContext) -> Union[List[RetrievedChunk], Tuple[List[RetrievedChunk], RoutingContext]]:
