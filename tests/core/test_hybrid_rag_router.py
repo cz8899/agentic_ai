@@ -1,10 +1,4 @@
 # tests/core/test_hybrid_rag_router.py
-"""
-Comprehensive test suite for HybridRAGRouter.
-Validates policy permutations, fallbacks, caching, logging, and observability.
-All mocks are isolated and explicitly managed.
-"""
-
 import logging
 import pytest
 from unittest.mock import MagicMock, patch
@@ -15,9 +9,7 @@ from app.core.policy_store import PolicyStore
 
 @pytest.fixture
 def mock_policy_store():
-    """Mock policy store with full policy support."""
     store = MagicMock()
-
     policies = {
         "planner.first": "true",
         "disable_planner": "false",
@@ -46,12 +38,10 @@ def mock_policy_store():
     def get_float(key, default=0.0):
         return float(policies.get(key, default))
 
-    store.get.side_effect = lambda key, default=None: policies.get(key, default)
     store.get_str.side_effect = get_str
     store.get_bool.side_effect = get_bool
     store.get_int.side_effect = get_int
     store.get_float.side_effect = get_float
-
     return store
 
 
@@ -82,9 +72,8 @@ def mock_feedback():
 
 @pytest.fixture
 def make_chunk():
-    def _make(content: str, score: float = 0.5, source: str = "test", doc_id: str = None):
-        if doc_id is None:
-            doc_id = f"doc-{abs(hash(content)) % 10000}"
+    def _make(content: str, score: float = 0.5, source: str = "test"):
+        doc_id = f"doc-{abs(hash(content)) % 10000}"
         return RetrievedChunk(
             chunk=DocumentChunk(
                 id=doc_id,
@@ -107,7 +96,6 @@ def mock_redis_client():
         client.publish.return_value = True
         mock.return_value = client
         yield client
-        mock.reset_mock()
 
 
 # 🔹 1. Test policy combinations
@@ -182,7 +170,6 @@ def test_fallback_when_retrieval_fails(
     )
 
     result = router.route("Query")
-
     assert len(result) == 1
     assert "fallback" in result[0].chunk.content
 
@@ -238,15 +225,16 @@ def test_feedback_triggered_on_low_score(mock_policy_store, mock_ranker, mock_fe
 
 # 🔹 5. Test cache hit and miss logging
 def test_cache_hit_miss_logging(caplog, mock_redis_client):
-    router = HybridRAGRouter(use_redis=True, enable_caching=True, debug_mode=False)
+    router = HybridRAGRouter(use_redis=True, enable_caching=True, debug_mode=True)
 
     with caplog.at_level(logging.INFO):
-        result = router.route("Query", session_id="test")
+        result, ctx = router.route("Query", session_id="test")
         assert "RAG route complete" in caplog.text
+        assert ctx.cache_hit is False
 
         mock_redis_client.get.return_value = b'[{"chunk": {"id": "cached", "content": "cached"}, "score": 0.9}]'
-        result = router.route("Query", session_id="test")
-        assert "RAG route complete" in caplog.text
+        result, ctx = router.route("Query", session_id="test")
+        assert ctx.cache_hit is True
 
 
 # 🔹 6. Test in-memory cache used when Redis fails
