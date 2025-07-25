@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import List, Optional, Dict, Any, Tuple, Union
 import redis  # pip install redis
 
-from app.utils.schema import RetrievedChunk, QueryPayload
+from app.utils.schema import RetrievedChunk, QueryPayload, ChatTurn
 from app.core.retrieval_coordinator import RetrievalCoordinator
 from app.core.policy_store import PolicyStore
 from app.core.rank_with_bedrock import BedrockRanker
@@ -154,6 +154,7 @@ class HybridRAGRouter:
             }
 
     def _build_payload(self, query: str, policies: Dict[str, Any]) -> QueryPayload:
+        """Build QueryPayload without unsupported args."""
         return QueryPayload(
             query=query,
             top_k=policies["retrieval.top_k"],
@@ -183,9 +184,9 @@ class HybridRAGRouter:
             raw = json.loads(data)
             return [
                 RetrievedChunk(
-                    chunk=DocumentChunk(**c["chunk"]),
+                    chunk=ChatTurn(**c["chunk"]) if "role" in c["chunk"] else DocumentChunk(**c["chunk"]),
                     score=c["score"],
-                    explanation=c.get("explanation")
+                    explanation=c["explanation"]
                 )
                 for c in raw
             ]
@@ -205,14 +206,11 @@ class HybridRAGRouter:
             try:
                 data = self.redis_client.get(key)
                 if data is not None:
-                    try:
-                        result = self._deserialize(data.decode('utf-8'))
-                        if result:
-                            ctx.cache_hit = True
-                            logger.info("Cache hit (Redis): %s", key)
-                            return result
-                    except Exception as e:
-                        logger.error(f"Failed to decode or deserialize cache  {e}")
+                    result = self._deserialize(data.decode('utf-8'))
+                    if result:
+                        ctx.cache_hit = True
+                        logger.info("Cache hit (Redis): %s", key)
+                        return result
             except Exception as e:
                 logger.warning(f"Redis GET failed: {e}")
 
