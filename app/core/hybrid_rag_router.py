@@ -328,7 +328,7 @@ class HybridRAGRouter:
 
         ctx.retrieval_used = True
         ctx.total_context_chunks = len(retrieved_chunks)
-        ctx.retrieval_filtered_count = len(retrieved_chunks) - len(ranked)
+        ctx.retrieval_filtered_count = max(len(retrieved_chunks) - len(ranked), 0)
         ctx.retrieval_sources = list(set(retrieval_sources))
 
         # === Feedback Loop ===
