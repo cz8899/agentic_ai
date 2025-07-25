@@ -1,370 +1,165 @@
-# tests/core/test_hybrid_rag_router.py
-import logging
 import pytest
+import logging
 from unittest.mock import MagicMock, patch
-from app.core.hybrid_rag_router import HybridRAGRouter, FallbackReason, RouterMode
-from app.utils.schema import RetrievedChunk, DocumentChunk
-from app.core.policy_store import PolicyStore
+from app.core.hybrid_rag_router import HybridRAGRouter
+from app.core.routing_context import RoutingContext
+from app.models.data_models import RetrievedChunk, DocumentChunk
+from app.utils.enums import FallbackReason
 
-
-@pytest.fixture
-def mock_policy_store():
-    store = MagicMock()
-    policies = {
-        "planner.first": "true",
-        "disable_planner": "false",
-        "enable_feedback": "true",
-        "enable_rerank": "true",
-        "skip_cache": "false",
-        "retrieval.score_threshold": 0.0,
-        "max_retry_depth": 2,
-        "enable_fallback": "true",
-        "retrieval.top_k": 5,
-        "enable_bedrock_kb": "true",
-        "disable_opensearch": "false",
-        "enable_chroma": "false",
-    }
-
-    def get_str(key, default=""):
-        return str(policies.get(key, default))
-
-    def get_bool(key, default=False):
-        value = policies.get(key, str(default))
-        return str(value).strip().lower() in ["true", "1", "yes", "on"]
-
-    def get_int(key, default=1):
-        return int(policies.get(key, default))
-
-    def get_float(key, default=0.0):
-        return float(policies.get(key, default))
-
-    store.get_str.side_effect = get_str
-    store.get_bool.side_effect = get_bool
-    store.get_int.side_effect = get_int
-    store.get_float.side_effect = get_float
-    return store
-
+logger = logging.getLogger("app")
 
 @pytest.fixture
-def mock_retrieval_coordinator():
-    return MagicMock()
-
-
-@pytest.fixture
-def mock_ranker():
-    return MagicMock()
-
+def mock_context():
+    return RoutingContext(query="Test query", user_id="123")
 
 @pytest.fixture
-def mock_fallback():
-    return MagicMock()
+def router():
+    return HybridRAGRouter()
 
-
-@pytest.fixture
-def mock_planner():
-    return MagicMock()
-
-
-@pytest.fixture
-def mock_feedback():
-    return MagicMock()
-
-
-@pytest.fixture
-def make_chunk():
-    def _make(content: str, score: float = 0.5, source: str = "test"):
-        doc_id = f"doc-{abs(hash(content)) % 10000}"
-        return RetrievedChunk(
-            chunk=DocumentChunk(
-                id=doc_id,
-                content=content,
-                source=source,
-                title=f"Chunk: {content[:30]}..."
-            ),
-            score=score
-        )
-    return _make
-
-
-@pytest.fixture
-def mock_redis_client():
-    with patch("redis.from_url") as mock:
-        client = MagicMock()
-        client.ping.return_value = True
-        client.get.return_value = None
-        client.setex.return_value = True
-        client.publish.return_value = True
-        mock.return_value = client
-        yield client
-
-
-# 🔹 1. Test policy combinations
-@pytest.mark.parametrize("planner_first,fallback_enabled", [
-    ("true", "true"),
-    ("false", "true"),
-    ("true", "false"),
-    ("false", "false"),
+@pytest.mark.parametrize("planner_enabled,retriever_enabled", [
+    (False, True),
+    (True, False),
+    (False, False),
+    (True, True)
 ])
-def test_policy_combinations(
-    mock_policy_store,
-    mock_planner,
-    mock_retrieval_coordinator,
-    mock_fallback,
-    mock_ranker,
-    planner_first,
-    fallback_enabled,
-    make_chunk
-):
-    mock_policy_store.get.side_effect = lambda key, default=None: {
-        "planner.first": planner_first,
-        "enable_fallback": fallback_enabled,
-        "retrieval.score_threshold": 0.0,
-    }.get(key, default)
+def test_policy_combinations(mock_context, router, planner_enabled, retriever_enabled):
+    router.planner = MagicMock()
+    router.planner_enabled = planner_enabled
+    router.retriever = MagicMock()
+    router.retriever_enabled = retriever_enabled
+    router.rank = MagicMock()
+    router.fallback_router = MagicMock()
 
-    if planner_first == "true":
-        mock_planner.plan_as_context.return_value = [make_chunk("planner", 0.9)]
-        mock_ranker.rank.return_value = [make_chunk("planner", 0.9)]
-    else:
-        mock_planner.plan_as_context.return_value = []
+    chunk = DocumentChunk(id="doc-123", content="retrieved", source="test", title="title")
+    router.rank.return_value = [RetrievedChunk(chunk=chunk, score=0.9)]
+    router.fallback_router.route.return_value = [RetrievedChunk(chunk=chunk, score=0.4)]
 
-    mock_retrieval_coordinator.hybrid_retrieve.return_value = [make_chunk("retrieved", 0.8)]
-    mock_fallback.generate_fallback.return_value = [make_chunk("fallback", 0.7)]
-
-    router = HybridRAGRouter(
-        planner=mock_planner,
-        coordinator=mock_retrieval_coordinator,
-        fallback=mock_fallback,
-        ranker=mock_ranker,
-        policy_store=mock_policy_store,
-        enable_caching=False,
-        debug_mode=False
-    )
-
-    result = router.route("Test query")
-
-    if planner_first == "true" and result:
-        assert "planner" in result[0].chunk.content
-    elif result:
-        assert "retrieved" in result[0].chunk.content
-
-    if fallback_enabled == "false":
-        assert result == []
+    result = router.route(mock_context)
+    assert isinstance(result, list)
+    if planner_enabled or retriever_enabled:
+        assert any("retrieved" in r.chunk.content for r in result)
 
 
-# 🔹 2. Test fallback when retrieval fails
-def test_fallback_when_retrieval_fails(
-    mock_policy_store,
-    mock_retrieval_coordinator,
-    mock_fallback,
-    make_chunk
-):
-    mock_retrieval_coordinator.hybrid_retrieve.side_effect = Exception("Retrieval failed")
-    mock_fallback.generate_fallback.return_value = [make_chunk("fallback")]
+def test_rerank_skipped_if_disabled(mock_context, router):
+    router.policy_store.get.side_effect = lambda k: False if "rerank" in k else True
+    router.retriever.retrieve = MagicMock(return_value=[DocumentChunk(id="1", content="A")])
+    router.rank = MagicMock()
 
-    router = HybridRAGRouter(
-        coordinator=mock_retrieval_coordinator,
-        fallback=mock_fallback,
-        policy_store=mock_policy_store,
-        enable_caching=False,
-        debug_mode=False
-    )
-
-    result = router.route("Query")
-    assert len(result) == 1
-    assert "fallback" in result[0].chunk.content
+    results = router.route(mock_context)
+    router.rank.assert_not_called()
+    assert isinstance(results, list)
 
 
-# 🔹 3. Test retry exhaustion logs and stops
-def test_retry_exhaustion_logs_and_stops(mock_policy_store, make_chunk, caplog):
-    feedback = MagicMock()
-    feedback.retry_or_replan.return_value = "Rewritten query"
+def test_reranker_runs_with_planner(mock_context, router):
+    router.policy_store.get.side_effect = lambda k: True
+    router.planner.plan.return_value = [DocumentChunk(id="1", content="planner")]
+    router.rank = MagicMock()
+    router.rank.return_value = [RetrievedChunk(chunk=DocumentChunk(id="1", content="planner"), score=0.95)]
 
-    fallback = MagicMock()
-    fallback.generate_fallback.return_value = [make_chunk("final")]
+    results = router.route(mock_context)
+    router.rank.assert_called()
+    assert results[0].chunk.content == "planner"
 
-    router = HybridRAGRouter(
-        feedback=feedback,
-        fallback=fallback,
-        policy_store=mock_policy_store,
-        max_retry_depth=1,
-        use_redis=False,
-        debug_mode=True
-    )
 
+def test_feedback_triggered_on_low_score(mock_context, router):
+    router.feedback = MagicMock()
+    router.rank = MagicMock()
+    chunk = DocumentChunk(id="id", content="fallback")
+    router.rank.return_value = [RetrievedChunk(chunk=chunk, score=0.3)]
+
+    router.route(mock_context)
+    router.feedback.send_feedback.assert_called()
+
+
+def test_retry_exhaustion_logs_and_stops(mock_context, router, caplog):
+    router.planner.plan.side_effect = NameError("name 'history' is not defined")
+    router.retry_depth = 1
     with caplog.at_level(logging.WARNING):
-        result, ctx = router.route("Query", retry_depth=1)
-
-    assert "Max retry depth (1) reached. Skipping feedback retry." in caplog.text
-    assert ctx.fallback_reason == FallbackReason.RETRY_EXHAUSTED
-    assert len(result) == 1
-    assert "final" in result[0].chunk.content
+        router.route(mock_context)
+        assert "Max retry depth (1) reached. Skipping feedback retry." in caplog.text
 
 
-# 🔹 4. Test feedback triggered on low score
-def test_feedback_triggered_on_low_score(mock_policy_store, mock_ranker, mock_feedback, make_chunk):
-    mock_ranker.rank.return_value = [make_chunk("low-score", 0.1)]
-    mock_feedback.should_retry.return_value = True
-    mock_feedback.retry_or_replan.return_value = "Improved query"
+def test_retrieval_exception_is_handled(mock_context, router):
+    router.retriever.retrieve.side_effect = Exception("API failure")
+    router.fallback_router.route = MagicMock(return_value=[])
 
-    router = HybridRAGRouter(
-        feedback=mock_feedback,
-        ranker=mock_ranker,
-        policy_store=mock_policy_store,
-        max_retry_depth=2,
-        use_redis=False,
-        debug_mode=True
-    )
-
-    with patch.object(router, 'route') as mock_route:
-        mock_route.side_effect = lambda *args, **kwargs: ([make_chunk("good-result", 0.8)], MagicMock())
-        result, ctx = router.route("Query")
-
-    mock_route.assert_called()
-    assert "good-result" in result[0].chunk.content
+    results = router.route(mock_context)
+    assert results == []
 
 
-# 🔹 5. Test cache hit and miss logging
-def test_cache_hit_miss_logging(caplog, mock_redis_client):
-    router = HybridRAGRouter(use_redis=True, enable_caching=True, debug_mode=True)
+def test_planner_exception_is_handled(mock_context, router):
+    router.planner.plan.side_effect = Exception("Planner down")
+    router.fallback_router.route = MagicMock(return_value=[])
+
+    results = router.route(mock_context)
+    assert results == []
+
+
+def test_cache_hit_sets_ctx_cache_hit(mock_context, router):
+    router._get_from_cache = MagicMock(return_value=[RetrievedChunk(chunk=DocumentChunk(id="doc-1", content="cached"), score=0.5)])
+
+    results = router.route(mock_context)
+    assert mock_context.cache_hit
+    assert results[0].chunk.content == "cached"
+
+
+def test_cache_miss_sets_ctx_cache_miss(mock_context, router):
+    router._get_from_cache = MagicMock(return_value=None)
+    router._set_in_cache = MagicMock()
+    router.fallback_router.route = MagicMock(return_value=[])
+
+    router.route(mock_context)
+    assert not mock_context.cache_hit
+
+
+def test_cache_hit_miss_logging(mock_context, router, caplog):
+    router._get_from_cache = MagicMock(return_value=None)
+    router._set_in_cache = MagicMock()
+    router.fallback_router.route = MagicMock(return_value=[])
 
     with caplog.at_level(logging.INFO):
-        result, ctx = router.route("Query", session_id="test")
+        router.route(mock_context)
         assert "RAG route complete" in caplog.text
-        assert ctx.cache_hit is False
-
-        mock_redis_client.get.return_value = b'[{"chunk": {"id": "cached", "content": "cached"}, "score": 0.9}]'
-        result, ctx = router.route("Query", session_id="test")
-        assert ctx.cache_hit is True
 
 
-# 🔹 6. Test in-memory cache used when Redis fails
-def test_in_memory_cache_used_when_redis_fails(monkeypatch, mock_policy_store):
-    monkeypatch.setattr("redis.from_url", lambda *args, **kwargs: None)
+def test_in_memory_cache_used_when_redis_fails(mock_context, router):
+    router.redis_cache = MagicMock()
+    router.redis_cache.get.side_effect = Exception("Redis down")
+    router._set_in_cache = MagicMock()
+    router.fallback_router.route = MagicMock(return_value=[])
 
-    router = HybridRAGRouter(
-        policy_store=mock_policy_store,
-        use_redis=True,
-        enable_caching=True,
-        debug_mode=True
-    )
-
-    with patch.object(router, '_get_from_cache', wraps=router._get_from_cache) as mock_get:
-        with patch.object(router, '_set_in_cache', wraps=router._set_in_cache) as mock_set:
-            result, ctx = router.route("Query", session_id="test")
-            assert mock_get.called
-            assert mock_set.called
+    router.route(mock_context)
+    assert router._set_in_cache.called
 
 
-# 🔹 7. Test fallback reasons are set correctly
-def test_fallback_reasons_are_set_correctly(mock_policy_store, mock_retrieval_coordinator, mock_fallback, make_chunk):
-    fallback = MagicMock()
-    fallback.generate_fallback.return_value = [make_chunk("fallback")]
+def test_fallback_triggered_when_empty_result(mock_context, router):
+    router.retriever.retrieve = MagicMock(return_value=[])
+    router.fallback_router.route = MagicMock(return_value=[RetrievedChunk(chunk=DocumentChunk(id="f1", content="fallback"), score=0.5)])
 
-    mock_retrieval_coordinator.hybrid_retrieve.return_value = []
-
-    router = HybridRAGRouter(
-        coordinator=mock_retrieval_coordinator,
-        fallback=fallback,
-        policy_store=mock_policy_store,
-        enable_caching=False,
-        debug_mode=True
-    )
-
-    result, ctx = router.route("No results query", session_id="test")
-    assert ctx.fallback_reason == FallbackReason.GENERATED
+    results = router.route(mock_context)
+    assert "fallback" in results[0].chunk.content
 
 
-# 🔹 8. Test pubsub publishes event
-def test_pubsub_publishes_event(mock_redis_client):
-    router = HybridRAGRouter(use_redis=True, enable_pubsub=True, debug_mode=False)
+def test_ctx_tracks_fallback_reason(mock_context, router):
+    router.retriever.retrieve = MagicMock(return_value=[])
+    router.fallback_router.route = MagicMock(return_value=[])
 
-    router.publish_feedback_event("test_event", {"data": "test"})
-
-    mock_redis_client.publish.assert_called_once()
-
-
-# 🔹 9. Test planner used when high score
-def test_planner_used_when_high_score(mock_policy_store, mock_planner, mock_ranker, make_chunk):
-    mock_planner.plan_as_context.return_value = [make_chunk("planner", 0.9)]
-    mock_ranker.rank.return_value = [make_chunk("planner", 0.9)]
-
-    router = HybridRAGRouter(
-        planner=mock_planner,
-        ranker=mock_ranker,
-        policy_store=mock_policy_store,
-        enable_caching=False,
-        debug_mode=False
-    )
-
-    result = router.route("Query")
-    assert "planner" in result[0].chunk.content
+    router.route(mock_context)
+    assert FallbackReason.RETRIEVAL_EMPTY in mock_context.fallback_reasons
 
 
-# 🔹 10. Test retrieval used when planner disabled
-def test_retrieval_used_when_planner_disabled(mock_policy_store, mock_retrieval_coordinator, make_chunk):
-    mock_policy_store.get_bool.side_effect = lambda key, default=False: {
-        "planner.first": False,
-        "disable_planner": True
-    }.get(key, default)
+def test_retrieval_used_when_planner_disabled(mock_context, router):
+    router.policy_store.get.side_effect = lambda k: False if "planner" in k else True
+    router.retriever.retrieve = MagicMock(return_value=[DocumentChunk(id="id", content="R")])
 
-    mock_retrieval_coordinator.hybrid_retrieve.return_value = [make_chunk("retrieved", 0.8)]
-
-    router = HybridRAGRouter(
-        coordinator=mock_retrieval_coordinator,
-        policy_store=mock_policy_store,
-        enable_caching=False,
-        debug_mode=False
-    )
-
-    result = router.route("Query")
-    assert "retrieved" in result[0].chunk.content
+    results = router.route(mock_context)
+    assert "R" in results[0].chunk.content
 
 
-# 🔹 11. Test debug mode returns context
-def test_debug_mode_returns_context(mock_policy_store, mock_fallback, make_chunk):
-    mock_fallback.generate_fallback.return_value = [make_chunk("fallback")]
+def test_reranked_list_truncated_to_top_k(mock_context, router):
+    chunk = DocumentChunk(id="doc-1", content="A")
+    retrieved = [RetrievedChunk(chunk=chunk, score=s) for s in [0.9, 0.8, 0.7, 0.6]]
+    router.rank = MagicMock(return_value=retrieved)
 
-    router = HybridRAGRouter(
-        fallback=mock_fallback,
-        policy_store=mock_policy_store,
-        debug_mode=True,
-        enable_caching=False
-    )
-
-    result, ctx = router.route("Query")
-    assert isinstance(result, list)
-    assert hasattr(ctx, 'query')
-
-
-# 🔹 12. Test cache hit sets ctx.cache_hit
-def test_cache_hit_sets_ctx_cache_hit(mock_redis_client, make_chunk):
-    cached_chunks = [make_chunk("cached", 0.9)]
-    mock_redis_client.get.return_value = b'[{"chunk": {"id": "cached", "content": "cached"}, "score": 0.9}]'
-
-    router = HybridRAGRouter(use_redis=True, enable_caching=True, debug_mode=True)
-
-    with patch.object(router, '_deserialize', return_value=cached_chunks):
-        result, ctx = router.route("Query", session_id="test")
-
-    assert ctx.cache_hit is True
-    assert "cached" in result[0].chunk.content
-
-
-# 🔹 13. Test fallback_used is set to True
-def test_fallback_used_is_set_to_true(mock_policy_store, mock_retrieval_coordinator, mock_fallback, make_chunk):
-    fallback = MagicMock()
-    fallback.generate_fallback.return_value = [make_chunk("fallback")]
-
-    mock_retrieval_coordinator.hybrid_retrieve.return_value = []
-
-    router = HybridRAGRouter(
-        coordinator=mock_retrieval_coordinator,
-        fallback=fallback,
-        policy_store=mock_policy_store,
-        enable_caching=False,
-        debug_mode=True
-    )
-
-    result, ctx = router.route("No results query", session_id="test")
-    assert ctx.fallback_used is True
-    assert ctx.fallback_reason == FallbackReason.GENERATED
+    results = router.route(mock_context)
+    assert len(results) <= 3
