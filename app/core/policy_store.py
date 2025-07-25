@@ -58,7 +58,7 @@ DEFAULT_POLICIES = {
 @dataclass
 class PolicyConfig:
     table_name: str = ""
-    region: str = "us-east-1"
+    region: str = "us-west-2"
     local_mode: bool = False
 
 
@@ -81,6 +81,7 @@ class PolicyStore:
         self.table = None
         self._local_cache: Dict[str, str] = {}
 
+        # Only try to connect if not in local mode
         if not self.config.local_mode:
             self._load_source()
         else:
@@ -88,6 +89,12 @@ class PolicyStore:
 
     def _load_source(self):
         """Initialize DynamoDB client or fall back to local mode."""
+        # If table name is empty, force local mode
+        if not self.config.table_name:
+            logger.warning("DynamoDB table name is empty. Falling back to local mode.")
+            self.config.local_mode = True
+            return
+
         try:
             dynamodb = boto3.resource(
                 'dynamodb',
@@ -196,11 +203,13 @@ class PolicyStore:
         try:
             if isinstance(value, list):
                 return value
-            if value.strip().startswith("["):
-                return json.loads(value)
-            return [item.strip() for item in value.split(",") if item.strip()]
-        except Exception:
-            logger.warning(f"Failed to parse list for policy {key}: {value}")
+            if isinstance(value, str):
+                if value.strip().startswith("["):
+                    return json.loads(value)
+                return [item.strip() for item in value.split(",") if item.strip()]
+            return default or []
+        except Exception as e:
+            logger.warning(f"Failed to parse list for policy {key}: {value} | Error: {e}")
             return default or []
 
     def get_dict(self, key: str, default: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -210,9 +219,11 @@ class PolicyStore:
         try:
             if isinstance(value, dict):
                 return value
-            return json.loads(value)
-        except Exception:
-            logger.warning(f"Failed to parse dict for policy {key}: {value}")
+            if isinstance(value, str):
+                return json.loads(value)
+            return default or {}
+        except Exception as e:
+            logger.warning(f"Failed to parse dict for policy {key}: {value} | Error: {e}")
             return default or {}
 
     def put(self, key: str, value: Any):
