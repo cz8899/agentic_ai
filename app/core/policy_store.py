@@ -2,7 +2,7 @@
 import logging
 import json
 import os
-from typing import Any, Optional, List, Dict, TypeVar, Callable
+from typing import Any, Optional, List, Dict, TypeVar
 from dataclasses import dataclass
 
 try:
@@ -66,20 +66,18 @@ class PolicyStore:
     """
     Central policy store for runtime configuration.
     Loads from DynamoDB, environment variables, or defaults.
+    In CI/CD, runs in local_mode to avoid AWS calls.
     """
 
     def __init__(self, config: Optional[PolicyConfig] = None):
-        if not HAS_BOTO3:
-            logger.warning("boto3 not installed. Running in local mode only.")
-            self.config = config or PolicyConfig()
-            self.config.local_mode = True
-            self.table = None
-            self._local_cache: Dict[str, str] = {}
-            return
-
         self.config = config or PolicyConfig()
         self.table = None
         self._local_cache: Dict[str, str] = {}
+
+        # Force local_mode in CI/CD or when boto3 is missing
+        if not HAS_BOTO3 or os.getenv("CI", "").lower() == "true":
+            logger.info("Running in CI/CD or boto3 not available. Forcing local_mode.")
+            self.config.local_mode = True
 
         # Only try to connect if not in local mode
         if not self.config.local_mode:
@@ -89,7 +87,6 @@ class PolicyStore:
 
     def _load_source(self):
         """Initialize DynamoDB client or fall back to local mode."""
-        # If table name is empty, force local mode
         if not self.config.table_name:
             logger.warning("DynamoDB table name is empty. Falling back to local mode.")
             self.config.local_mode = True
