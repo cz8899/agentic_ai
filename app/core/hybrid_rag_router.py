@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import List, Optional, Dict, Any, Tuple, Union, Callable
 import redis  # pip install redis
 
-from app.utils.schema import RetrievedChunk, QueryPayload, ChatTurn
+from app.utils.schema import RetrievedChunk, DocumentChunk, QueryPayload, ChatTurn
 from app.core.retrieval_coordinator import RetrievalCoordinator
 from app.core.policy_store import PolicyStore
 from app.core.rank_with_bedrock import BedrockRanker
@@ -27,6 +27,10 @@ class FallbackReason(StrEnum):
     PLANNER_LOW_SCORE = "planner_low_score"
     RETRIEVAL_FAILED = "retrieval_failed"
     RETRIEVAL_EMPTY = "retrieval_empty"
+    RETRIEVAL_FILTERED = "retrieval_filtered"
+    SESSION_MEMORY = "session_memory"
+    PLANNER_CONTEXT = "planner_context"
+    PLANNER_CONTEXT_EMPTY = "planner_context_empty"
     GENERATED = "generated"
     CACHE_HIT = "cache_hit"
     RETRY_EXHAUSTED = "retry_exhausted"
@@ -60,7 +64,7 @@ class RoutingContext:
     retrieval_sources: List[str] = field(default_factory=list)
     rerank_performed: bool = False
     cache_hit: bool = False
-    mode: RouterMode = RouterMode.RETRIEVAL  # ✅ New: for introspection
+    mode: RouterMode = RouterMode.RETRIEVAL
 
 
 class HybridRAGRouter:
@@ -80,7 +84,6 @@ class HybridRAGRouter:
         use_redis: bool = True,
         enable_pubsub: bool = False,
         redis_client: Optional[redis.Redis] = None,
-        # 🧪 Testing hook
         time_fn: Callable[[], float] = time.time
     ):
         self.policy_store = policy_store or PolicyStore()
@@ -97,9 +100,8 @@ class HybridRAGRouter:
         self.enable_pubsub = enable_pubsub
         self.redis_client: Optional[redis.Redis] = redis_client
         self._in_memory_cache: Dict[str, Tuple[List[RetrievedChunk], float]] = {}
-        self.time_fn = time_fn  # 🧪 Injected for testing
+        self.time_fn = time_fn
 
-        # Initialize Redis client if needed
         if self.use_redis and self.enable_caching and self.redis_client is None:
             try:
                 self.redis_client = redis.from_url(redis_url or "redis://localhost:6379/0")
@@ -109,7 +111,6 @@ class HybridRAGRouter:
                 logger.warning(f"Redis connection failed: {e}. Falling back to in-memory.")
                 self.redis_client = None
 
-        # Load policies
         self._load_policies()
 
     def _load_policies(self):
@@ -180,14 +181,15 @@ class HybridRAGRouter:
             for c in chunks
         ])
 
-    def _deserialize(self,  str) -> List[RetrievedChunk]:
+    def _deserialize(self,  str) -> List[RetrievedChunk]:  # ✅ Fixed: added 'data: str'
+        """Deserialize JSON to RetrievedChunk list."""
         try:
             raw = json.loads(data)
             return [
                 RetrievedChunk(
-                    chunk=ChatTurn(**c["chunk"]) if "role" in c["chunk"] else DocumentChunk(**c["chunk"]),
+                    chunk=DocumentChunk(**c["chunk"]),
                     score=c["score"],
-                    explanation=c["explanation"]
+                    explanation=c.get("explanation")
                 )
                 for c in raw
             ]
@@ -196,38 +198,33 @@ class HybridRAGRouter:
             return []
 
     def _sanitize_input(self, s: str) -> str:
-        """Normalize input for cache key generation."""
         return s.strip().lower()
 
     def _cache_key(self, query: str, session_id: str, policy_hash: str) -> str:
-        """Generate unique cache key. Uses sanitized input to prevent log leakage."""
         sanitized_query = self._sanitize_input(query)
         combined = f"rag:route:{sanitized_query}|{session_id}|{policy_hash}"
         return hashlib.md5(combined.encode()).hexdigest()
 
     def _get_from_cache(self, key: str, ctx: RoutingContext) -> Optional[List[RetrievedChunk]]:
-        """Get from Redis or in-memory cache."""
         if not self.enable_caching or self.skip_cache:
             return None
 
-        # 1. Redis
         if self.redis_client:
             try:
                 data = self.redis_client.get(key)
                 if data is not None:
                     result = self._deserialize(data.decode('utf-8'))
                     if result:
-                        ctx.cache_hit = True  # ✅ Set cache_hit flag
+                        ctx.cache_hit = True
                         logger.info("Cache hit (Redis): %s", key)
                         return result
             except Exception as e:
                 logger.warning(f"Redis GET failed: {e}")
 
-        # 2. In-memory
         if key in self._in_memory_cache:
             chunks, timestamp = self._in_memory_cache[key]
             if (self.time_fn() - timestamp) < self.cache_ttl:
-                ctx.cache_hit = True  # ✅ Set cache_hit flag
+                ctx.cache_hit = True
                 logger.info("Cache hit (in-memory): %s", key)
                 return chunks
             else:
@@ -286,6 +283,15 @@ class HybridRAGRouter:
             retry_depth=retry_depth,
             max_retry_depth=self.max_retry_depth
         )
+
+        if not query or not isinstance(query, str) or query.strip() == "":
+            logger.warning("Invalid or empty query received: %r", query)
+            ctx.fallback_reason = FallbackReason.UNKNOWN
+            ctx.latency = self.time_fn() - start
+            return self._return([], ctx)
+
+        query = query.strip()
+        logger.info("Processing query: %s", query[:100] + ("..." if len(query) > 100 else ""))
 
         # === Caching: Check early ===
         if self.enable_caching and retry_depth == 0 and not self.skip_cache:
@@ -356,7 +362,8 @@ class HybridRAGRouter:
                 retry_query = self.feedback.retry_or_replan(query, history)
                 if retry_query:
                     if retry_query == query:
-                        logger.warning("Retry triggered with same query. Possible deadlock.")
+                        if self.debug_mode:
+                            logger.warning("Retry triggered with same query. Possible deadlock.")
                     else:
                         logger.info("Feedback retry with new query: '%s'", retry_query)
                         ctx.feedback_retry = True
@@ -370,17 +377,37 @@ class HybridRAGRouter:
                             _policy_snapshot=policies
                         )
 
-        # === Fallback ===
+        # === Fallback Path ===
         if not ranked:
+            ctx.fallback_used = True  # ✅ Set fallback_used = True
+            if history:
+                logger.info("Falling back to session history context.")
+                ctx.fallback_reason = FallbackReason.SESSION_MEMORY
+                ctx.final_chunk_count = len(history)
+                return self._return(history, ctx)
+
+            try:
+                planner_fallback = self.planner.plan_as_context([], query)
+                if planner_fallback:
+                    logger.info("Falling back to planner-generated context.")
+                    ctx.fallback_reason = FallbackReason.PLANNER_CONTEXT
+                    ctx.final_chunk_count = len(planner_fallback)
+                    return self._return(planner_fallback, ctx)
+                else:
+                    ctx.fallback_reason = FallbackReason.PLANNER_CONTEXT_EMPTY
+            except Exception as e:
+                logger.debug("Planner fallback failed: %s", e)
+                ctx.fallback_reason = FallbackReason.PLANNER_CONTEXT_EMPTY
+
             try:
                 fallback_result = self.fallback.generate_fallback(query)
                 ctx.fallback_reason = FallbackReason.GENERATED
                 ctx.final_chunk_count = len(fallback_result)
-                ctx.mode = RouterMode.FALLBACK
                 return self._return(fallback_result or [], ctx)
             except Exception as e:
-                logger.error(f"Fallback failed: {e}")
+                logger.error(f"Fallback generation failed: {e}")
                 ctx.fallback_reason = FallbackReason.UNKNOWN
+                return self._return([], ctx)
 
         ctx.mode = RouterMode.RETRIEVAL
         ctx.rank_source = "retrieval"
