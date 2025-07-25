@@ -79,7 +79,9 @@ class HybridRAGRouter:
         redis_url: Optional[str] = None,
         use_redis: bool = True,
         enable_pubsub: bool = False,
-        redis_client: Optional[redis.Redis] = None
+        redis_client: Optional[redis.Redis] = None,
+        enable_rerank: bool = True,
+        skip_cache: bool = False
     ):
         self.policy_store = policy_store or PolicyStore()
         self.retrieval_coordinator = coordinator or RetrievalCoordinator(policy_store=self.policy_store)
@@ -94,9 +96,10 @@ class HybridRAGRouter:
         self.use_redis = use_redis
         self.enable_pubsub = enable_pubsub
         self.redis_client: Optional[redis.Redis] = redis_client
+        self.enable_rerank = enable_rerank
+        self.skip_cache = skip_cache
         self._in_memory_cache: Dict[str, Tuple[List[RetrievedChunk], float]] = {}
 
-        # Initialize Redis if needed
         if self.use_redis and self.enable_caching and self.redis_client is None:
             try:
                 self.redis_client = redis.from_url(redis_url or "redis://localhost:6379/0")
@@ -106,7 +109,6 @@ class HybridRAGRouter:
                 logger.warning(f"Redis connection failed: {e}. Falling back to in-memory.")
                 self.redis_client = None
 
-        # Load policies
         self._load_policies()
 
     def _load_policies(self):
@@ -115,8 +117,8 @@ class HybridRAGRouter:
             self.enable_planner_first = self.policy_store.get_bool("planner.first", True)
             self.disable_planner = self.policy_store.get_bool("disable_planner", False)
             self.enable_feedback = self.policy_store.get_bool("enable_feedback", True)
-            self.enable_rerank = self.policy_store.get_bool("enable_rerank", True)
-            self.skip_cache = self.policy_store.get_bool("skip_cache", False)
+            self.enable_rerank = self.policy_store.get_bool("enable_rerank", self.enable_rerank)
+            self.skip_cache = self.policy_store.get_bool("skip_cache", self.skip_cache)
             self.retrieval_score_threshold = self.policy_store.get_float("retrieval.score_threshold", 0.0)
             self.max_retry_depth = self.policy_store.get_int("max_retry_depth", 2)
         except Exception as e:
