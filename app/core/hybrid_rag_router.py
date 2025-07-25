@@ -49,7 +49,7 @@ class RoutingContext:
     final_chunk_count: int = 0
     rank_source: Optional[str] = None
     fallback_reason: FallbackReason = FallbackReason.UNKNOWN
-    fallback_meta Dict[str, Any] = field(default_factory=dict)
+    fallback_meta: Dict[str, Any] = field(default_factory=dict)
     planner_score: Optional[float] = None
     retrieval_sources: List[str] = field(default_factory=list)
     rerank_performed: bool = False
