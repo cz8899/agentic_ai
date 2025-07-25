@@ -42,16 +42,57 @@ def test_policy_combinations(
         assert result == [retrieval_chunk]
     else:
         assert result == []
-
 @pytest.mark.parametrize("planner_first,fallback_enabled", [
-    ("true", "true"),
-    ("false", "true"),
-    ("true", "false"),
-    ("false", "false"),
+    (True, True),
+    (False, True),
+    (True, False),
+    (False, False),
 ])
-def test_policy_combinations(*args, **kwargs):
-    test_policy_combinations(*args, **kwargs)
+def test_policy_combinations(
+    mock_policy_store,
+    mock_planner,
+    mock_retrieval_coordinator,
+    mock_fallback,
+    planner_first,
+    fallback_enabled,
+    make_chunk,
+):
+    # Stub policy values
+    mock_policy_store.get_bool.side_effect = lambda key, default=False: {
+        "planner.first": planner_first,
+        "enable_fallback": fallback_enabled,
+    }.get(key, default)
 
+    # Create real chunks
+    planner_chunk = make_chunk("planner", 0.9)
+    retrieval_chunk = make_chunk("retrieved", 0.8)
+    fallback_chunk = make_chunk("fallback", 0.7)
+
+    # Configure mocks
+    mock_planner.plan_as_context.return_value = [planner_chunk] if planner_first else []
+    mock_retrieval_coordinator.hybrid_retrieve.return_value = [retrieval_chunk]
+    mock_fallback.generate_fallback.return_value = [fallback_chunk]
+
+    # Build router
+    router = HybridRAGRouter(
+        planner=mock_planner,
+        coordinator=mock_retrieval_coordinator,
+        fallback=mock_fallback,
+        policy_store=mock_policy_store,
+        enable_caching=False,
+        debug_mode=False,
+    )
+
+    # Act
+    result = router.route("Test query")
+
+    # Assert
+    if planner_first:
+        assert result == [planner_chunk]
+    elif fallback_enabled:
+        assert result == [retrieval_chunk]
+    else:
+        assert result == []
 def test_fallback_when_retrieval_fails(
     mock_retrieval_coordinator,
     mock_fallback,
