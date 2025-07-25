@@ -443,3 +443,54 @@ def test_retrieval_exception_is_handled(mock_policy_store, mock_retrieval_coordi
     assert len(result) > 0
     assert "fallback" in result[0].chunk.content
     assert ctx.fallback_reason == FallbackReason.RETRIEVAL_FAILED
+
+
+# 🔹 17. Test feedback loop respects max_retry_depth
+def test_feedback_respects_max_retry_depth(mock_policy_store, mock_feedback, make_chunk):
+    mock_feedback.should_retry.return_value = True
+    mock_feedback.retry_or_replan.return_value = "retry query"
+
+    router = HybridRAGRouter(
+        feedback=mock_feedback,
+        policy_store=mock_policy_store,
+        max_retry_depth=1,
+        use_redis=False,
+        debug_mode=True
+    )
+
+    with patch.object(router, 'route') as mock_route:
+        mock_route.return_value = ([make_chunk("result", 0.8)], MagicMock())
+        result, ctx = router.route("Query", retry_depth=1)
+
+    assert ctx.fallback_reason == FallbackReason.RETRY_EXHAUSTED
+
+
+# 🔹 18. Test fallback_reason is set to PLANNER_LOW_SCORE
+def test_planner_low_score_sets_fallback_reason(mock_policy_store, mock_planner, make_chunk):
+    mock_planner.plan_as_context.side_effect = Exception("Planner failed")
+    mock_retrieval_coordinator = MagicMock()
+    mock_retrieval_coordinator.hybrid_retrieve.return_value = []
+
+    router = HybridRAGRouter(
+        planner=mock_planner,
+        coordinator=mock_retrieval_coordinator,
+        policy_store=mock_policy_store,
+        debug_mode=True
+    )
+
+    result, ctx = router.route("Query")
+    assert ctx.fallback_reason == FallbackReason.PLANNER_LOW_SCORE
+
+
+# 🔹 19. Test retrieval_used is set when retrieval runs
+def test_retrieval_used_is_set(mock_policy_store, mock_retrieval_coordinator, make_chunk):
+    mock_retrieval_coordinator.hybrid_retrieve.return_value = [make_chunk("retrieved", 0.8)]
+
+    router = HybridRAGRouter(
+        coordinator=mock_retrieval_coordinator,
+        policy_store=mock_policy_store,
+        debug_mode=True
+    )
+
+    result, ctx = router.route("Query")
+    assert ctx.retrieval_used is True
