@@ -30,15 +30,6 @@ def mock_policy_store():
         "enable_bedrock_kb": "true",
         "disable_opensearch": "false",
         "enable_chroma": "false",
-        "opensearch.host": "search-mydomain.us-east-1.es.amazonaws.com",
-        "opensearch.index": "chat-history",
-        "opensearch.username": "admin",
-        "opensearch.password": "admin-pass",
-        "intent_keywords.retrieve": "show, find, lookup, details",
-        "intent_keywords.summarize": "summary, summarize, tl;dr",
-        "intent_keywords.analyze": "trend, analyze, insight",
-        "intent_keywords.fallback": "unknown, error",
-        "intent_keywords.tool_call": "calculate, convert",
     }
 
     def get_str(key, default=""):
@@ -129,6 +120,7 @@ def test_policy_combinations(
     mock_planner,
     mock_retrieval_coordinator,
     mock_fallback,
+    mock_ranker,
     planner_first,
     fallback_enabled,
     make_chunk
@@ -143,7 +135,6 @@ def test_policy_combinations(
     # Planner context
     if planner_first == "true":
         mock_planner.plan_as_context.return_value = [make_chunk("planner", 0.9)]
-        mock_ranker = MagicMock()
         mock_ranker.rank.return_value = [make_chunk("planner", 0.9)]
     else:
         mock_planner.plan_as_context.return_value = []
@@ -158,7 +149,7 @@ def test_policy_combinations(
         planner=mock_planner,
         coordinator=mock_retrieval_coordinator,
         fallback=mock_fallback,
-        ranker=mock_ranker if planner_first == "true" else MagicMock(),
+        ranker=mock_ranker,
         policy_store=mock_policy_store,
         enable_caching=False
     )
@@ -316,9 +307,8 @@ def test_pubsub_publishes_event(mock_redis_client):
 
 
 # 🔹 9. Test planner used when high score
-def test_planner_used_when_high_score(mock_policy_store, mock_planner, make_chunk):
+def test_planner_used_when_high_score(mock_policy_store, mock_planner, mock_ranker, make_chunk):
     mock_planner.plan_as_context.return_value = [make_chunk("planner", 0.9)]
-    mock_ranker = MagicMock()
     mock_ranker.rank.return_value = [make_chunk("planner", 0.9)]
 
     router = HybridRAGRouter(
@@ -376,10 +366,11 @@ def test_cache_hit_sets_ctx_cache_hit(mock_redis_client, make_chunk):
     cached_chunks = [make_chunk("cached", 0.9)]
     mock_redis_client.get.return_value = b'[{"chunk": {"id": "cached", "content": "cached"}, "score": 0.9}]'
 
-    router = HybridRAGRouter(use_redis=True, enable_caching=True)
+    # ✅ Fix: Use debug_mode=True in constructor
+    router = HybridRAGRouter(use_redis=True, enable_caching=True, debug_mode=True)
 
     with patch.object(router, '_deserialize', return_value=cached_chunks):
-        result, ctx = router.route("Query", session_id="test", debug_mode=True)
+        result, ctx = router.route("Query", session_id="test")
 
     assert ctx.cache_hit is True
     assert "cached" in result[0].chunk.content
@@ -405,3 +396,48 @@ def test_fallback_used_is_set_to_true(mock_policy_store, mock_retrieval_coordina
         router.route("No results query", session_id="test")
         _, ctx = mock_return.call_args[0]
         assert ctx.fallback_used is True
+
+
+# 🔹 14. Test retrieval_filtered_count is correct
+def test_retrieval_filtered_count_is_correct(mock_policy_store, mock_retrieval_coordinator, mock_ranker, make_chunk):
+    # 5 retrieved, 3 after ranking (filtered 2)
+    retrieved = [make_chunk(f"retrieved-{i}", 0.6) for i in range(5)]
+    ranked = retrieved[:3]  # Simulate filtering
+
+    mock_retrieval_coordinator.hybrid_retrieve.return_value = retrieved
+    mock_ranker.rank.return_value = ranked
+
+    router = HybridRAGRouter(
+        coordinator=mock_retrieval_coordinator,
+        ranker=mock_ranker,
+        policy_store=mock_policy_store,
+        debug_mode=True,
+        enable_caching=False
+    )
+
+    result, ctx = router.route("Query")
+
+    assert len(result) == 3
+    assert ctx.total_context_chunks == 5
+    assert ctx.retrieval_filtered_count == 2
+
+
+# 🔹 15. Test _deserialize handles malformed input
+def test_deserialize_handles_malformed_input(make_chunk):
+    router = HybridRAGRouter()
+
+    # Valid input
+    valid = '[{"chunk": {"id": "1", "content": "valid"}, "score": 0.8}]'
+    result = router._deserialize(valid)
+    assert len(result) == 1
+    assert "valid" in result[0].chunk.content
+
+    # Malformed JSON
+    invalid = 'not-a-json'
+    result = router._deserialize(invalid)
+    assert result == []
+
+    # Missing fields
+    partial = '[{"chunk": {"id": "2"}, "score": 0.7}]'
+    result = router._deserialize(partial)
+    assert len(result) > 0  # Should not crash
