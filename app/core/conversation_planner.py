@@ -66,7 +66,7 @@ class ConversationPlanner:
             },
         }
 
-    def plan_as_context(self, history: List[ChatTurn], user_message: str) -> List[RetrievedChunk]:
+    def plan_as_context(self, query: str) -> List[RetrievedChunk]:
         plan = self.plan(history, user_message)
         if plan["confidence"] < self.min_confidence:
             return []
