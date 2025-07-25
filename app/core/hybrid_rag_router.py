@@ -96,6 +96,7 @@ class HybridRAGRouter:
         self.redis_client: Optional[redis.Redis] = redis_client
         self._in_memory_cache: Dict[str, Tuple[List[RetrievedChunk], float]] = {}
 
+        # Initialize Redis if needed
         if self.use_redis and self.enable_caching and self.redis_client is None:
             try:
                 self.redis_client = redis.from_url(redis_url or "redis://localhost:6379/0")
@@ -105,6 +106,7 @@ class HybridRAGRouter:
                 logger.warning(f"Redis connection failed: {e}. Falling back to in-memory.")
                 self.redis_client = None
 
+        # Load policies
         self._load_policies()
 
     def _load_policies(self):
