@@ -12,6 +12,8 @@ try:
 except ImportError:
     boto3 = None
     ClientError = Exception
+    NoCredentialsError = Exception
+    PartialCredentialsError = Exception
     HAS_BOTO3 = False
 
 logger = logging.getLogger(__name__)
@@ -22,26 +24,34 @@ T = TypeVar('T')
 # Default fallback values
 DEFAULT_POLICIES = {
     "planner.first": "true",
-    "enable_fallback": "true",
+    "disable_planner": "false",
+    "enable_feedback": "true",
+    "enable_rerank": "true",
+    "skip_cache": "false",
     "retrieval.score_threshold": 0.0,
-    "retrieval.top_k": 5,
+    "max_retry_depth": "2",
+    "enable_fallback": "true",
+    "retrieval.top_k": "5",
     "enable_bedrock_kb": "true",
     "disable_opensearch": "false",
     "enable_chroma": "false",
-    "planner.min_confidence": 0.7,
-    "feedback.enable_replan": "true",
-    "feedback.critique_score_threshold": 0.25,
+    "planner.min_confidence": "0.7",
+    "feedback.critique_score_threshold": "0.25",
     "ranker.model": "anthropic.claude-3-sonnet-20240229-v1:0",
     "claude_direct_model": "anthropic.claude-3-sonnet-20240229-v1:0",
-    "opensearch.host": None,
+    "opensearch.host": "localhost",
+    "opensearch.port": "443",
     "opensearch.index": "chat-history",
-    "opensearch.username": None,
-    "opensearch.password": None,
+    "opensearch.username": "admin",
+    "opensearch.password": "admin-pass",
     "intent_keywords.retrieve": "show, find, lookup, details",
     "intent_keywords.summarize": "summary, summarize, tl;dr",
     "intent_keywords.analyze": "trend, analyze, insight",
     "intent_keywords.fallback": "unknown, error",
     "intent_keywords.tool_call": "calculate, convert",
+    "redis.url": "redis://localhost:6379/0",
+    "cache.ttl": "300",
+    "pubsub.enable": "true",
 }
 
 
@@ -60,19 +70,24 @@ class PolicyStore:
 
     def __init__(self, config: Optional[PolicyConfig] = None):
         if not HAS_BOTO3:
-            raise ImportError("boto3 not installed. Run: pip install boto3")
+            logger.warning("boto3 not installed. Running in local mode only.")
+            self.config = config or PolicyConfig()
+            self.config.local_mode = True
+            self.table = None
+            self._local_cache: Dict[str, str] = {}
+            return
 
         self.config = config or PolicyConfig()
         self.table = None
         self._local_cache: Dict[str, str] = {}
-        self._load_source()
+
+        if not self.config.local_mode:
+            self._load_source()
+        else:
+            logger.info("PolicyStore running in local mode. Using env vars and defaults.")
 
     def _load_source(self):
-        """Initialize DynamoDB client or use local mode."""
-        if self.config.local_mode:
-            logger.info("PolicyStore running in local mode. Using env vars and defaults.")
-            return
-
+        """Initialize DynamoDB client or fall back to local mode."""
         try:
             dynamodb = boto3.resource(
                 'dynamodb',
@@ -179,12 +194,26 @@ class PolicyStore:
         if not value:
             return default or []
         try:
+            if isinstance(value, list):
+                return value
             if value.strip().startswith("["):
                 return json.loads(value)
             return [item.strip() for item in value.split(",") if item.strip()]
         except Exception:
             logger.warning(f"Failed to parse list for policy {key}: {value}")
             return default or []
+
+    def get_dict(self, key: str, default: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        value = self.get(key, "")
+        if not value:
+            return default or {}
+        try:
+            if isinstance(value, dict):
+                return value
+            return json.loads(value)
+        except Exception:
+            logger.warning(f"Failed to parse dict for policy {key}: {value}")
+            return default or {}
 
     def put(self, key: str, value: Any):
         """Write policy back to DynamoDB (optional)."""
