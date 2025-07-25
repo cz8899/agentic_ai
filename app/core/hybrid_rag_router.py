@@ -32,6 +32,12 @@ class FallbackReason(StrEnum):
     RETRY_EXHAUSTED = "retry_exhausted"
 
 
+class RouterMode(StrEnum):
+    PLANNER = "planner"
+    RETRIEVAL = "retrieval"
+    FALLBACK = "fallback"
+
+
 @dataclass
 class RoutingContext:
     query: str
@@ -54,6 +60,7 @@ class RoutingContext:
     retrieval_sources: List[str] = field(default_factory=list)
     rerank_performed: bool = False
     cache_hit: bool = False
+    mode: RouterMode = RouterMode.RETRIEVAL
 
 
 class HybridRAGRouter:
@@ -260,6 +267,7 @@ class HybridRAGRouter:
             cached = self._get_from_cache(cache_key, ctx)
             if cached:
                 ctx.fallback_reason = FallbackReason.CACHE_HIT
+                ctx.mode = RouterMode.RETRIEVAL
                 ctx.latency = time.time() - start
                 return self._return(cached, ctx)
 
@@ -276,6 +284,7 @@ class HybridRAGRouter:
                         ctx.final_chunk_count = len(ranked)
                         ctx.rank_source = "planner"
                         ctx.planner_score = ranked[0].score
+                        ctx.mode = RouterMode.PLANNER
                         return self._return(ranked, ctx)
                     else:
                         logger.info("Planner returned only low/no-score chunks.")
@@ -337,6 +346,7 @@ class HybridRAGRouter:
                     fallback_result = self.fallback.generate_fallback(query)
                     ctx.fallback_reason = FallbackReason.GENERATED
                     ctx.final_chunk_count = len(fallback_result)
+                    ctx.mode = RouterMode.FALLBACK
                     return self._return(fallback_result or [], ctx)
                 except Exception as e:
                     logger.error(f"Fallback failed: {e}")
@@ -344,7 +354,7 @@ class HybridRAGRouter:
             else:
                 ctx.fallback_reason = FallbackReason.UNKNOWN
 
-        ctx.rank_source = "retrieval"
+        ctx.mode = RouterMode.RETRIEVAL
         ctx.final_chunk_count = len(ranked)
         ctx.latency = time.time() - start
 
