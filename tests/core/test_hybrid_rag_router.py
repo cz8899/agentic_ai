@@ -100,7 +100,8 @@ def test_retry_exhaustion_logs_and_stops(mock_policy_store, mock_planner, mock_f
     mock_retrieval_coordinator = MagicMock()
     mock_retrieval_coordinator.hybrid_retrieve.return_value = [make_chunk("low", 0.1)]
     mock_feedback.retry_or_replan.return_value = "retry query"
-
+    mock_fallback.generate_fallback.return_value = []
+    
     router = HybridRAGRouter(
         planner=mock_planner,
         coordinator=mock_retrieval_coordinator,
@@ -142,6 +143,8 @@ def test_feedback_triggered_on_low_score(mock_policy_store, mock_retrieval_coord
 
 # 🔹 5. Test cache hit and miss logging
 def test_cache_hit_miss_logging(mock_policy_store, caplog):
+    mock_fallback.generate_fallback.return_value = []
+    
     router = HybridRAGRouter(
         policy_store=mock_policy_store,
         use_redis=True,
