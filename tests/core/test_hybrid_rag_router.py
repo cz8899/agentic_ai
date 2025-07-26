@@ -61,8 +61,8 @@ def test_policy_combinations(
         coordinator=mock_retrieval_coordinator,
         # fallback=mock_fallback,
         policy_store=mock_policy_store,
-        enable_caching=False,
-        debug_mode=False,
+        enable_caching=True,
+        debug_mode=True,
     )
 
     result = router.route("Test query")
@@ -86,8 +86,8 @@ def test_fallback_when_retrieval_fails(
         coordinator=mock_retrieval_coordinator,
         fallback=mock_fallback,
         policy_store=mock_policy_store,
-        enable_caching=False,
-        debug_mode=False,
+        enable_caching=True,
+        debug_mode=True,
     )
 
     result = router.route("Query")
@@ -190,7 +190,7 @@ def test_fallback_reasons_are_set_correctly(mock_policy_store, mock_retrieval_co
         coordinator=mock_retrieval_coordinator,
         fallback=mock_fallback,
         policy_store=mock_policy_store,
-        enable_caching=False,
+        enable_caching=True,
         debug_mode=True,
     )
 
@@ -224,7 +224,7 @@ def test_retrieval_filtered_count_is_correct(mock_policy_store, mock_retrieval_c
             coordinator=mock_retrieval_coordinator,
             policy_store=mock_policy_store,
             debug_mode=True,
-            enable_caching=False,
+            enable_caching=True,
         )
         result, ctx = router.route("Query")
 
@@ -244,7 +244,7 @@ def test_retrieval_exception_is_handled(mock_policy_store, mock_retrieval_coordi
         coordinator=mock_retrieval_coordinator,
         fallback=mock_fallback,
         policy_store=mock_policy_store,
-        enable_caching=False,
+        enable_caching=True,
         debug_mode=True,
     )
 
