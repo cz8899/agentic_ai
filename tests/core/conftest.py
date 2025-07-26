@@ -82,6 +82,11 @@ def _stub_everything(monkeypatch, make_chunk):
         lambda self, payload: [make_chunk("retrieved", 0.8)]
     )
 
+    monkeypatch.setattr(
+        "app.core.fallback_router.FallbackRouter.generate_fallback",
+        lambda self, query: []
+    )
+
     # 1️⃣ Always return a single retrieved chunk
     monkeypatch.setattr(
         RetrievalCoordinator, "hybrid_retrieve",
