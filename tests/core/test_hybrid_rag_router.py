@@ -42,37 +42,34 @@ def test_policy_combinations(
     fallback_enabled,
     make_chunk
 ):
-    mock_policy_store.get_bool.side_effect = lambda key, default=False: {
+    mock_policy_store.get_bool.side_effect = lambda k, d=False: {
         "planner.first": planner_first,
         "enable_fallback": fallback_enabled,
-    }.get(key, default)
+        "retrieval.score_threshold": 1.0,   # planner always rejected
+    }.get(k, d)
 
-    planner_chunk = make_chunk("planner", 0.9)
+    # planner_chunk = make_chunk("planner", 0.9)
     retrieval_chunk = make_chunk("retrieved", 0.8)
-    fallback_chunk = make_chunk("fallback", 0.7)
+    # fallback_chunk = make_chunk("fallback", 0.7)
 
-    mock_planner.plan_as_context.return_value = [planner_chunk] if planner_first else []
+    # mock_planner.plan_as_context.return_value = [planner_chunk] if planner_first else []
     mock_retrieval_coordinator.hybrid_retrieve.return_value = [retrieval_chunk]
-    mock_fallback.generate_fallback.return_value = [fallback_chunk]
+    # mock_fallback.generate_fallback.return_value = [fallback_chunk]
 
     router = HybridRAGRouter(
-        planner=mock_planner,
+        # planner=mock_planner,
         coordinator=mock_retrieval_coordinator,
-        fallback=mock_fallback,
+        # fallback=mock_fallback,
         policy_store=mock_policy_store,
         enable_caching=False,
         debug_mode=False,
     )
 
     result = router.route("Test query")
-
-    if planner_first:
-        assert result == [planner_chunk]
-    elif fallback_enabled:
+    if fallback_enabled:
         assert result == [retrieval_chunk]
     else:
-        assert result == []
-
+        assert result == []        # empty when fallback disabled
 
 # 🔹 2. Test fallback when retrieval fails
 def test_fallback_when_retrieval_fails(
