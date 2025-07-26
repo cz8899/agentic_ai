@@ -243,3 +243,23 @@ def test_retrieval_used_is_set():
 
     _, ctx = router.route("Tracking")
     assert ctx.retrieval_used is True
+
+def test_low_score_triggers_fallback_reason(mock_router, mock_retrieved_chunk):
+    # Arrange
+    mock_router.retrieval_score_threshold = 0.8  # High threshold
+    mock_router.enable_feedback = True
+    mock_router.feedback.should_retry = lambda *a, **kw: True
+    mock_router.feedback.retry_or_replan = lambda *a, **kw: None  # Simulate retry skipped
+
+    mock_router.retrieval_coordinator.hybrid_retrieve = lambda *a, **kw: [
+        mock_retrieved_chunk(score=0.2),
+        mock_retrieved_chunk(score=0.3)
+    ]
+
+    # Act
+    _, ctx = mock_router.route("explain quantum tunneling", debug_mode=True)
+
+    # Assert
+    assert ctx.fallback_reason == FallbackReason.LOW_SCORE
+    assert ctx.feedback_retry is False  # retry_or_replan returns None
+
