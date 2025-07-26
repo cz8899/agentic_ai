@@ -60,7 +60,7 @@ def test_policy_combinations(
     )
 
     # 4) run & assert
-    result = router.route("Test query")
+    result, _ = router.route("Test query")
     assert result == [retrieval_chunk]
 
 # 🔹 2. Test fallback when retrieval fails
