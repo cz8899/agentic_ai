@@ -226,6 +226,7 @@ def test_retrieval_exception_is_handled(
         fallback=fallback,
         policy_store=mock_policy_store,
         debug_mode=True,
+        fallback_reason_on_exception=True,
     )
 
     result, ctx = router.route("Query")
