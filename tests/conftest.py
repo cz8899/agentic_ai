@@ -66,6 +66,16 @@ def stub_ranker():
         m.return_value.rank.return_value = []
         yield m.return_value
 
+@pytest.fixture
+def mock_redis_client():
+    with patch("redis.from_url") as mock:
+        client = MagicMock()
+        client.ping.return_value = True
+        client.get.return_value = None
+        client.setex = MagicMock()
+        mock.return_value = client
+        yield client
+
 @pytest.fixture(autouse=True)
 def _stub_everything(monkeypatch, make_chunk):
     """
