@@ -85,7 +85,7 @@ def test_fallback_when_retrieval_fails(
         debug_mode=True,
     )
 
-    result = router.route("Query")
+    result, _ = router.route("Query")
     assert result == [fallback_chunk]
 
 
@@ -94,6 +94,7 @@ def test_retry_exhaustion_logs_and_stops(mock_policy_store, make_chunk, caplog):
     feedback = MagicMock()
     feedback.should_retry.return_value = True
     feedback.retry_or_replan.return_value = "rewritten query"
+    feedback.should_retry.return_value = True  # <-- ADD THIS
 
     fallback = MagicMock()
     fallback.generate_fallback.return_value = []
