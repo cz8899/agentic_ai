@@ -89,6 +89,7 @@ def test_fallback_when_retrieval_fails(
 # 🔹 3. Test retry exhaustion logs and stops
 def test_retry_exhaustion_logs_and_stops(mock_policy_store, make_chunk, caplog):
     feedback = MagicMock()
+    feedback.should_retry.return_value = True
     feedback.retry_or_replan.return_value = "rewritten query"
 
     fallback = MagicMock()
