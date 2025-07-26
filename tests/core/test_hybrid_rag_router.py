@@ -13,12 +13,12 @@ def mock_retrieval_coordinator():
 
 @pytest.fixture
 def mock_fallback():
-    return MagicMock()
+    return MagicMock
 
 
 @pytest.fixture
 def mock_planner():
-    return MagicMock()
+    return MagicMock
 
 
 @pytest.fixture
@@ -42,30 +42,32 @@ def test_policy_combinations(
     planner_first,
     fallback_enabled,
 ):
-    # 1) force deterministic policies
+    fallback = mock_fallback()
+    planner = mock_planner()
+    fallback.generate_fallback.return_value = [make_chunk("fallback")]
+    planner.plan.return_value = []
+
     mock_policy_store.get_bool.side_effect = lambda k, d=False: {
         "planner.first": planner_first,
         "enable_fallback": fallback_enabled,
-        "retrieval.score_threshold": 0.0,  # let retrieval win
+        "retrieval.score_threshold": 0.0,
     }.get(k, d)
 
-    # 2) stub retrieval
     retrieval_chunk = make_chunk("retrieved", 0.8)
     mock_retrieval_coordinator.hybrid_retrieve.return_value = [retrieval_chunk]
 
-    # 3) build router with instantiated mocks
     router = HybridRAGRouter(
         coordinator=mock_retrieval_coordinator,
-        fallback=mock_fallback(),
-        planner=mock_planner(),
+        fallback=fallback,
+        planner=planner,
         policy_store=mock_policy_store,
         enable_caching=False,
-        debug_mode=False,
+        debug_mode=True,
     )
 
-    # 4) run & assert
     result, _ = router.route("Test query")
     assert result == [retrieval_chunk]
+
 
 # 🔹 2. Test fallback when retrieval fails
 def test_fallback_when_retrieval_fails(
@@ -94,7 +96,7 @@ def test_fallback_when_retrieval_fails(
 def test_retry_exhaustion_logs_and_stops(mock_policy_store, make_chunk, caplog):
     feedback = MagicMock()
     feedback.should_retry.return_value = True
-    feedback.retry_or_replan.return_value = "rewritten query"
+    feedback.retry_or_replan.side_effect = ["retry-1", "retry-2"]  # trigger retry depth
 
     fallback = MagicMock()
     fallback.generate_fallback.return_value = []
@@ -148,7 +150,7 @@ def test_cache_hit_miss_logging(caplog, mock_redis_client, make_chunk):
         fallback=mock_fallback,
         use_redis=True,
         enable_caching=True,
-        debug_mode=True
+        debug_mode=True,
     )
 
     with caplog.at_level(logging.INFO):
@@ -161,16 +163,17 @@ def test_cache_hit_miss_logging(caplog, mock_redis_client, make_chunk):
 def test_in_memory_cache_used_when_redis_fails(
     monkeypatch, mock_policy_store, mock_retrieval_coordinator, make_chunk
 ):
-    # force redis.from_url to fail
     monkeypatch.setattr("redis.from_url", lambda *a, **kw: None)
     mock_retrieval_coordinator.hybrid_retrieve.return_value = [make_chunk("in-mem", 0.9)]
 
     router = HybridRAGRouter(
         coordinator=mock_retrieval_coordinator,
+        fallback=MagicMock(generate_fallback=lambda *_: [make_chunk("fallback")]),
         policy_store=mock_policy_store,
         enable_caching=True,
         debug_mode=True,
     )
+
     with patch.object(router, "_set_in_cache", autospec=True) as spy:
         router.route("Query", session_id="test")
         spy.assert_called()
@@ -231,7 +234,7 @@ def test_retrieval_filtered_count_is_correct(mock_policy_store, mock_retrieval_c
 # 🔹 10. Test retrieval exception is handled
 def test_retrieval_exception_is_handled(mock_policy_store, mock_retrieval_coordinator):
     fallback = MagicMock()
-    fallback.generate_fallback.side_effect = Exception("fallback failed")  # force RETRIEVAL_FAILED
+    fallback.generate_fallback.side_effect = Exception("fallback failed")
 
     mock_retrieval_coordinator.hybrid_retrieve.side_effect = Exception("boom")
 
