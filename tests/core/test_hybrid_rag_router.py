@@ -156,8 +156,7 @@ def test_in_memory_cache_used_when_redis_fails(
         enable_caching=True,
         debug_mode=True,
     )
-
-    with patch.object(router, "_set_in_cache") as spy:
+    with patch.object(router, "_set_in_cache", autospec=True) as spy:
         router.route("Query", session_id="test")
         spy.assert_called()
 
