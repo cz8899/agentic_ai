@@ -152,7 +152,7 @@ def test_cache_hit_miss_logging(caplog):
 
 
 def test_in_memory_cache_used_when_redis_fails():
-    with patch("app.utils.redis_utils.StrictRedis.from_url", side_effect=Exception("Redis error")):
+    with patch("redis.from_url", side_effect=Exception("Redis error")):
         router = HybridRAGRouter(
             coordinator=MagicMock(hybrid_retrieve=lambda *_: []),
             fallback=MagicMock(generate_fallback=lambda *_: [make_chunk("fallback", 0.6)]),
