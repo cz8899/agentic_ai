@@ -206,7 +206,8 @@ class HybridRAGRouter:
             retry_depth=retry_depth,
             max_retry_depth=self.max_retry_depth
         )
-
+        ranked =[]
+        
         # (Caching, planner, retrieval logic...)
 
         # === Feedback Loop ===
