@@ -22,10 +22,9 @@ def mock_policy_store():
     store.get_float.side_effect = lambda key, default=0.0: float(policies.get(key, default))
     return store
 
-
 @pytest.fixture
 def make_chunk():
-    def _make(content: str, score: float = 0.5, source: str = "test"):
+    def _factory(content: str, score: float = 0.5, source: str = "test"):
         from app.utils.schema import RetrievedChunk, DocumentChunk
         return RetrievedChunk(
             chunk=DocumentChunk(
@@ -36,9 +35,8 @@ def make_chunk():
             ),
             score=score
         )
-    return _make
-
-
+    return _factory
+    
 @pytest.fixture(autouse=True)
 def patch_env_vars(monkeypatch):
     monkeypatch.setenv("OPENSEARCH_USER", "test")
