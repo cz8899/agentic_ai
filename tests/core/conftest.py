@@ -66,47 +66,41 @@ def stub_ranker():
         m.return_value.rank.return_value = []
         yield m.return_value
 
-# tests/conftest.py  (append at the bottom)
 @pytest.fixture(autouse=True)
-def _stub_everything(monkeypatch, mock_policy_store):
+def _stub_everything(monkeypatch, make_chunk):
     """
-    Stub every component that tries to reach AWS, Redis, LLM, etc.
-    Keeps the router fast and isolated.
+    1) Stub every external dependency so tests never hit AWS/Redis/LLM
+    2) Provide deterministic mocks for all 14 tests
     """
+    from app.core.retrieval_coordinator import RetrievalCoordinator
+    from app.core.fallback_router import FallbackRouter
     from app.core.conversation_planner import ConversationPlanner
     from app.core.rank_with_bedrock import BedrockRanker
-    from app.core.fallback_router import FallbackRouter
-    # inside conftest.py → _stub_everything fixture
-    from app.core.retrieval_coordinator import RetrievalCoordinator
+
+    # 1️⃣ Always return a single retrieved chunk
     monkeypatch.setattr(
         RetrievalCoordinator, "hybrid_retrieve",
         lambda self, payload: [make_chunk("retrieved", 0.8)]
     )
-    # ConversationPlanner → always empty list
-    monkeypatch.setattr(
-        ConversationPlanner, "plan_as_context", lambda self, query: []
-    )
 
-    # BedrockRanker → identity (no filtering)
-    monkeypatch.setattr(
-        BedrockRanker, "__init__", lambda self, **kw: None
-    )
-    monkeypatch.setattr(
-        BedrockRanker, "rank", lambda self, query, chunks: chunks
-    )
+    # 2️⃣ BedrockRanker → identity passthrough
+    monkeypatch.setattr(BedrockRanker, "__init__", lambda self, **kw: None)
+    monkeypatch.setattr(BedrockRanker, "rank", lambda self, query, chunks: chunks)
 
-    # FallbackRouter → always empty list so we can force failures
-    monkeypatch.setattr(
-        FallbackRouter, "__init__", lambda self, **kw: None
-    )
-    monkeypatch.setattr(
-        FallbackRouter, "generate_fallback", lambda self, query: []
-    )
+    # 3️⃣ ConversationPlanner → empty list (never wins)
+    monkeypatch.setattr(ConversationPlanner, "__init__", lambda self, **kw: None)
+    monkeypatch.setattr(ConversationPlanner, "plan_as_context", lambda self, query: [])
 
-    # Force redis.from_url to return an in-memory mock
-    fake_redis = MagicMock()
-    fake_redis.ping.return_value = True
-    fake_redis.get.return_value = None          # cache miss
-    fake_redis.setex.return_value = True
-    fake_redis.publish.return_value = True
-    monkeypatch.setattr("redis.from_url", lambda *a, **kw: fake_redis)
+    # 4️⃣ FallbackRouter → empty list (keeps RETRIEVAL_FAILED reason)
+    monkeypatch.setattr(FallbackRouter, "__init__", lambda self, **kw: None)
+    monkeypatch.setattr(FallbackRouter, "generate_fallback", lambda self, query: [])
+
+    # 5️⃣ Redis stub (autouse) – already inside patch_redis
+    with patch("redis.from_url") as mock_from_url:
+        fake_redis = MagicMock()
+        fake_redis.ping.return_value = True
+        fake_redis.get.return_value = None
+        fake_redis.setex.return_value = True
+        fake_redis.publish.return_value = True
+        mock_from_url.return_value = fake_redis
+        yield
