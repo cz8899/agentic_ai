@@ -3,6 +3,15 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 import uuid
+from enum import Enum
+
+class FallbackReason(Enum):
+    """Reasons why a fallback response was triggered."""
+    LOW_SCORE = "low_score"
+    RETRIEVAL_FAILED = "retrieval_failed"
+    PLANNER_FAILED = "planner_failed"
+    CACHE_MISS = "cache_miss"
+    UNKNOWN = "unknown"
 
 
 @dataclass
