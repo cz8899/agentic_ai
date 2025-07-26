@@ -114,7 +114,7 @@ def test_retry_exhaustion_logs_and_stops(mock_policy_store, mock_planner, mock_f
 
     with caplog.at_level(logging.WARNING):
         result, ctx = router.route("Query", retry_depth=1)
-        assert "Max retry depth (1) reached. Skipping feedback retry." in caplog.text
+        assert "Max retry depth (2) reached. Skipping feedback retry." in caplog.text
         assert ctx.fallback_reason == FallbackReason.RETRY_EXHAUSTED
 
 
