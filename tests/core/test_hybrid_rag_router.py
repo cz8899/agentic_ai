@@ -140,7 +140,14 @@ def test_feedback_triggered_on_low_score(mock_policy_store, mock_retrieval_coord
 
 # 🔹 5. Test cache hit and miss logging
 def test_cache_hit_miss_logging(caplog, mock_redis_client):
-    router = HybridRAGRouter(use_redis=True, enable_caching=True, debug_mode=True)
+    mock_fallback = MagicMock()
+    mock_fallback.generate_fallback.return_value = [make_chunk("fallback")]
+    router = HybridRAGRouter(
+        fallback=mock_fallback,
+        use_redis=True,
+        enable_caching=True,
+        debug_mode=True
+    )
 
     with caplog.at_level(logging.INFO):
         result, ctx = router.route("Query", session_id="test")
@@ -153,6 +160,7 @@ def test_in_memory_cache_used_when_redis_fails(
 ):
     # force redis.from_url to fail
     monkeypatch.setattr("redis.from_url", lambda *a, **kw: None)
+    mock_retrieval_coordinator.hybrid_retrieve.return_value = [make_chunk("in-mem", 0.9)]
 
     router = HybridRAGRouter(
         coordinator=mock_retrieval_coordinator,
@@ -230,7 +238,6 @@ def test_retrieval_exception_is_handled(
         fallback=fallback,
         policy_store=mock_policy_store,
         debug_mode=True,
-        fallback_reason_on_exception=True,
     )
 
     result, ctx = router.route("Query")
