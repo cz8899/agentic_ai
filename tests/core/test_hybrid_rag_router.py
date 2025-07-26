@@ -36,7 +36,8 @@ def mock_feedback():
 def test_policy_combinations(
     mock_policy_store,
     mock_retrieval_coordinator,
-    mock_planner,  # <- ADD THIS
+    mock_fallback,
+    mock_planner,
     make_chunk,
     planner_first,
     fallback_enabled,
@@ -52,11 +53,11 @@ def test_policy_combinations(
     retrieval_chunk = make_chunk("retrieved", 0.8)
     mock_retrieval_coordinator.hybrid_retrieve.return_value = [retrieval_chunk]
 
-    # 3) build router
+    # 3) build router with instantiated mocks
     router = HybridRAGRouter(
         coordinator=mock_retrieval_coordinator,
-        fallback=mock_fallback,         # <- ADD THIS
-        planner=mock_planner,           # <- ADD THIS
+        fallback=mock_fallback(),
+        planner=mock_planner(),
         policy_store=mock_policy_store,
         enable_caching=False,
         debug_mode=False,
@@ -94,7 +95,6 @@ def test_retry_exhaustion_logs_and_stops(mock_policy_store, make_chunk, caplog):
     feedback = MagicMock()
     feedback.should_retry.return_value = True
     feedback.retry_or_replan.return_value = "rewritten query"
-    feedback.should_retry.return_value = True  # <-- ADD THIS
 
     fallback = MagicMock()
     fallback.generate_fallback.return_value = []
@@ -114,6 +114,7 @@ def test_retry_exhaustion_logs_and_stops(mock_policy_store, make_chunk, caplog):
     assert "Max retry depth (2) reached" in caplog.text
     assert ctx.fallback_reason == FallbackReason.RETRY_EXHAUSTED
     assert result == []
+
 
 # 🔹 4. Test feedback triggered on low score
 def test_feedback_triggered_on_low_score(mock_policy_store, mock_retrieval_coordinator, mock_feedback, make_chunk):
@@ -139,9 +140,10 @@ def test_feedback_triggered_on_low_score(mock_policy_store, mock_retrieval_coord
 
 
 # 🔹 5. Test cache hit and miss logging
-def test_cache_hit_miss_logging(caplog, mock_redis_client):
+def test_cache_hit_miss_logging(caplog, mock_redis_client, make_chunk):
     mock_fallback = MagicMock()
     mock_fallback.generate_fallback.return_value = [make_chunk("fallback")]
+
     router = HybridRAGRouter(
         fallback=mock_fallback,
         use_redis=True,
@@ -153,6 +155,7 @@ def test_cache_hit_miss_logging(caplog, mock_redis_client):
         result, ctx = router.route("Query", session_id="test")
         assert "RAG route complete" in caplog.text
         assert ctx.cache_hit is False
+
 
 # 🔹 6. Test in-memory cache used when Redis fails
 def test_in_memory_cache_used_when_redis_fails(
@@ -171,6 +174,7 @@ def test_in_memory_cache_used_when_redis_fails(
     with patch.object(router, "_set_in_cache", autospec=True) as spy:
         router.route("Query", session_id="test")
         spy.assert_called()
+
 
 # 🔹 7. Test fallback reasons are set correctly
 def test_fallback_reasons_are_set_correctly(mock_policy_store, mock_retrieval_coordinator, mock_fallback, make_chunk):
@@ -225,11 +229,9 @@ def test_retrieval_filtered_count_is_correct(mock_policy_store, mock_retrieval_c
 
 
 # 🔹 10. Test retrieval exception is handled
-def test_retrieval_exception_is_handled(
-    mock_policy_store, mock_retrieval_coordinator
-):
+def test_retrieval_exception_is_handled(mock_policy_store, mock_retrieval_coordinator):
     fallback = MagicMock()
-    fallback.generate_fallback.return_value = []  # force RETRIEVAL_FAILED
+    fallback.generate_fallback.side_effect = Exception("fallback failed")  # force RETRIEVAL_FAILED
 
     mock_retrieval_coordinator.hybrid_retrieve.side_effect = Exception("boom")
 
@@ -242,6 +244,7 @@ def test_retrieval_exception_is_handled(
 
     result, ctx = router.route("Query")
     assert ctx.fallback_reason == FallbackReason.RETRIEVAL_FAILED
+
 
 # 🔹 11. Test retrieval_used is set
 def test_retrieval_used_is_set(mock_policy_store, mock_retrieval_coordinator, make_chunk):
