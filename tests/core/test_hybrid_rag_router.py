@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, create_autospec, patch
 from app.core.hybrid_rag_router import HybridRAGRouter
 from app.utils.schema import RetrievedChunk, DocumentChunk, FallbackReason
 from app.core.policy_store import PolicyStore
-from app.core.retrieval_coordinator import HybridRetrievalCoordinator
+from app.core.retrieval_coordinator import RetrievalCoordinator
 from app.core.feedback import FeedbackCoordinator
 
 
