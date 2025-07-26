@@ -36,6 +36,7 @@ def mock_feedback():
 def test_policy_combinations(
     mock_policy_store,
     mock_retrieval_coordinator,
+    mock_planner,  # <- ADD THIS
     make_chunk,
     planner_first,
     fallback_enabled,
@@ -54,6 +55,8 @@ def test_policy_combinations(
     # 3) build router
     router = HybridRAGRouter(
         coordinator=mock_retrieval_coordinator,
+        fallback=mock_fallback,         # <- ADD THIS
+        planner=mock_planner,           # <- ADD THIS
         policy_store=mock_policy_store,
         enable_caching=False,
         debug_mode=False,
