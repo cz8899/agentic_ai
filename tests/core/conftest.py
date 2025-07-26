@@ -77,6 +77,11 @@ def _stub_everything(monkeypatch, make_chunk):
     from app.core.conversation_planner import ConversationPlanner
     from app.core.rank_with_bedrock import BedrockRanker
 
+    monkeypatch.setattr(
+        "app.core.retrieval_coordinator.RetrievalCoordinator.hybrid_retrieve",
+        lambda self, payload: [make_chunk("retrieved", 0.8)]
+    )
+
     # 1️⃣ Always return a single retrieved chunk
     monkeypatch.setattr(
         RetrievalCoordinator, "hybrid_retrieve",
