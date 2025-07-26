@@ -2,7 +2,7 @@
 import logging
 import pytest
 from unittest.mock import MagicMock, patch
-from app.core.hybrid_rag_router import HybridRAGRouter, FallbackReason, RouterMode
+from app.core.hybrid_rag_router import HybridRAGRouter, FallbackReason
 from app.utils.schema import RetrievedChunk, DocumentChunk
 
 
@@ -13,12 +13,12 @@ def mock_retrieval_coordinator():
 
 @pytest.fixture
 def mock_fallback():
-    return MagicMock
+    return MagicMock()
 
 
 @pytest.fixture
 def mock_planner():
-    return MagicMock
+    return MagicMock()
 
 
 @pytest.fixture
@@ -26,7 +26,6 @@ def mock_feedback():
     return MagicMock()
 
 
-# 🔹 1. Test policy combinations
 @pytest.mark.parametrize("planner_first,fallback_enabled", [
     (True, True),
     (False, True),
@@ -42,10 +41,7 @@ def test_policy_combinations(
     planner_first,
     fallback_enabled,
 ):
-    fallback = mock_fallback()
-    planner = mock_planner()
-    fallback.generate_fallback.return_value = [make_chunk("fallback")]
-    planner.plan.return_value = []
+    retrieval_chunk = make_chunk("retrieved", 0.8)
 
     mock_policy_store.get_bool.side_effect = lambda k, d=False: {
         "planner.first": planner_first,
@@ -53,13 +49,19 @@ def test_policy_combinations(
         "retrieval.score_threshold": 0.0,
     }.get(k, d)
 
-    retrieval_chunk = make_chunk("retrieved", 0.8)
     mock_retrieval_coordinator.hybrid_retrieve.return_value = [retrieval_chunk]
+
+    if planner_first:
+        mock_planner.plan.return_value = [retrieval_chunk]
+    else:
+        mock_planner.plan.return_value = []
+
+    mock_fallback.generate_fallback.return_value = [make_chunk("fallback", 0.5)]
 
     router = HybridRAGRouter(
         coordinator=mock_retrieval_coordinator,
-        fallback=fallback,
-        planner=planner,
+        fallback=mock_fallback,
+        planner=mock_planner,
         policy_store=mock_policy_store,
         enable_caching=False,
         debug_mode=True,
@@ -69,7 +71,6 @@ def test_policy_combinations(
     assert result == [retrieval_chunk]
 
 
-# 🔹 2. Test fallback when retrieval fails
 def test_fallback_when_retrieval_fails(
     mock_policy_store,
     mock_retrieval_coordinator,
@@ -77,8 +78,7 @@ def test_fallback_when_retrieval_fails(
     make_chunk
 ):
     mock_retrieval_coordinator.hybrid_retrieve.side_effect = Exception("Retrieval failed")
-    fallback_chunk = make_chunk("fallback")
-    mock_fallback.generate_fallback.return_value = [fallback_chunk]
+    mock_fallback.generate_fallback.return_value = [make_chunk("fallback")]
 
     router = HybridRAGRouter(
         coordinator=mock_retrieval_coordinator,
@@ -89,21 +89,24 @@ def test_fallback_when_retrieval_fails(
     )
 
     result, _ = router.route("Query")
-    assert result == [fallback_chunk]
+    assert result == [make_chunk("fallback")]
 
 
-# 🔹 3. Test retry exhaustion logs and stops
 def test_retry_exhaustion_logs_and_stops(mock_policy_store, make_chunk, caplog):
     feedback = MagicMock()
     feedback.should_retry.return_value = True
-    feedback.retry_or_replan.side_effect = ["retry-1", "retry-2"]  # trigger retry depth
+    feedback.retry_or_replan.side_effect = ["no-result-1", "no-result-2"]
 
     fallback = MagicMock()
     fallback.generate_fallback.return_value = []
 
+    coordinator = MagicMock()
+    coordinator.hybrid_retrieve.return_value = []
+
     router = HybridRAGRouter(
         feedback=feedback,
         fallback=fallback,
+        coordinator=coordinator,
         policy_store=mock_policy_store,
         max_retry_depth=2,
         use_redis=False,
@@ -118,7 +121,6 @@ def test_retry_exhaustion_logs_and_stops(mock_policy_store, make_chunk, caplog):
     assert result == []
 
 
-# 🔹 4. Test feedback triggered on low score
 def test_feedback_triggered_on_low_score(mock_policy_store, mock_retrieval_coordinator, mock_feedback, make_chunk):
     mock_retrieval_coordinator.hybrid_retrieve.return_value = [make_chunk("low-score", 0.1)]
     mock_feedback.should_retry.return_value = True
@@ -141,7 +143,6 @@ def test_feedback_triggered_on_low_score(mock_policy_store, mock_retrieval_coord
     assert "good-result" in result[0].chunk.content
 
 
-# 🔹 5. Test cache hit and miss logging
 def test_cache_hit_miss_logging(caplog, mock_redis_client, make_chunk):
     mock_fallback = MagicMock()
     mock_fallback.generate_fallback.return_value = [make_chunk("fallback")]
@@ -159,10 +160,7 @@ def test_cache_hit_miss_logging(caplog, mock_redis_client, make_chunk):
         assert ctx.cache_hit is False
 
 
-# 🔹 6. Test in-memory cache used when Redis fails
-def test_in_memory_cache_used_when_redis_fails(
-    monkeypatch, mock_policy_store, mock_retrieval_coordinator, make_chunk
-):
+def test_in_memory_cache_used_when_redis_fails(monkeypatch, mock_policy_store, mock_retrieval_coordinator, make_chunk):
     monkeypatch.setattr("redis.from_url", lambda *a, **kw: None)
     mock_retrieval_coordinator.hybrid_retrieve.return_value = [make_chunk("in-mem", 0.9)]
 
@@ -179,7 +177,6 @@ def test_in_memory_cache_used_when_redis_fails(
         spy.assert_called()
 
 
-# 🔹 7. Test fallback reasons are set correctly
 def test_fallback_reasons_are_set_correctly(mock_policy_store, mock_retrieval_coordinator, mock_fallback, make_chunk):
     mock_retrieval_coordinator.hybrid_retrieve.return_value = []
     mock_fallback.generate_fallback.return_value = [make_chunk("fallback")]
@@ -196,20 +193,18 @@ def test_fallback_reasons_are_set_correctly(mock_policy_store, mock_retrieval_co
     assert ctx.fallback_reason == FallbackReason.GENERATED
 
 
-# 🔹 8. Test pubsub publishes event
 def test_pubsub_publishes_event(mock_policy_store):
     router = HybridRAGRouter(
         policy_store=mock_policy_store,
         use_redis=True,
         enable_pubsub=True,
-        debug_mode=False
+        debug_mode=False,
     )
 
     router.publish_feedback_event("test_event", {"data": "test"})
     router.redis_client.publish.assert_called_once()
 
 
-# 🔹 9. Test retrieval_filtered_count is correct
 def test_retrieval_filtered_count_is_correct(mock_policy_store, mock_retrieval_coordinator, make_chunk):
     retrieved = [make_chunk(f"retrieved-{i}", 0.6) for i in range(5)]
     ranked = retrieved[:3]
@@ -231,7 +226,6 @@ def test_retrieval_filtered_count_is_correct(mock_policy_store, mock_retrieval_c
     assert ctx.retrieval_filtered_count == 2
 
 
-# 🔹 10. Test retrieval exception is handled
 def test_retrieval_exception_is_handled(mock_policy_store, mock_retrieval_coordinator):
     fallback = MagicMock()
     fallback.generate_fallback.side_effect = Exception("fallback failed")
@@ -249,7 +243,6 @@ def test_retrieval_exception_is_handled(mock_policy_store, mock_retrieval_coordi
     assert ctx.fallback_reason == FallbackReason.RETRIEVAL_FAILED
 
 
-# 🔹 11. Test retrieval_used is set
 def test_retrieval_used_is_set(mock_policy_store, mock_retrieval_coordinator, make_chunk):
     mock_policy_store.get_bool.side_effect = lambda key, default=False: {
         "planner.first": False,
