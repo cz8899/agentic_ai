@@ -3,7 +3,6 @@ import pytest
 from unittest.mock import patch, MagicMock
 import os
 
-
 @pytest.fixture
 def mock_policy_store():
     store = MagicMock()
@@ -79,7 +78,12 @@ def _stub_everything(monkeypatch, mock_policy_store):
     from app.core.conversation_planner import ConversationPlanner
     from app.core.rank_with_bedrock import BedrockRanker
     from app.core.fallback_router import FallbackRouter
-
+    # inside conftest.py → _stub_everything fixture
+    from app.core.retrieval_coordinator import RetrievalCoordinator
+    monkeypatch.setattr(
+        RetrievalCoordinator, "hybrid_retrieve",
+        lambda self, payload: [make_chunk("retrieved", 0.8)]
+    )
     # ConversationPlanner → always empty list
     monkeypatch.setattr(
         ConversationPlanner, "plan_as_context", lambda self, query: []
