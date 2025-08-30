@@ -649,593 +649,594 @@ else:
     backend_container_image = ecs.ContainerImage.from_docker_image_asset(backend_image)
 
 # create app execute role
-        app_execute_role = iam.Role(
-            self,
-            "AppExecuteRole",
-            assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
-            permissions_boundary=boundary
-        )
-        app_execute_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=[
-                    "ecr:GetAuthorizationToken",
-                    "ecr:BatchCheckLayerAvailability",
-                    "ecr:GetDownloadUrlForLayer",
-                    "ecr:BatchGetImage",
-                    "logs:CreateLogStream",
-                    "logs:PutLogEvents",
-                ],
-                resources=["*"],
-            )
-        )
+app_execute_role = iam.Role(
+    self,
+    "AppExecuteRole",
+    assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
+    permissions_boundary=boundary
+)
+app_execute_role.add_to_policy(
+    iam.PolicyStatement(
+        actions=[
+            "ecr:GetAuthorizationToken",
+            "ecr:BatchCheckLayerAvailability",
+            "ecr:GetDownloadUrlForLayer",
+            "ecr:BatchGetImage",
+            "logs:CreateLogStream",
+            "logs:PutLogEvents",
+        ],
+        resources=["*"],
+    )
+)
 
-        # Add policy statements to the IAM role
-        app_execute_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=[
-                    "wellarchitected:GetLensReview",
-                    "wellarchitected:ListAnswers",
-                    "wellarchitected:GetWorkload",
-                    "wellarchitected:UpdateAnswer",
-                    "wellarchitected:CreateMilestone",
-                    "wellarchitected:GetLensReviewReport",
-                    "wellarchitected:AssociateLenses",
-                    "wellarchitected:ListWorkloads",
-                ],
-                resources=["*"],
-            )
-        )
-        app_execute_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=[
-                    "wellarchitected:CreateWorkload",
-                    "wellarchitected:TagResource",
-                ],
-                resources=["*"],
-                conditions={
-                    "StringLike": {
-                        "aws:RequestTag/WorkloadName": [
-                            "DO_NOT_DELETE_temp_IaCAnalyzer_*",
-                            "IaCAnalyzer_*",
-                        ]
-                    }
-                },
-            )
-        )
-        app_execute_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=[
-                    "wellarchitected:DeleteWorkload",
-                ],
-                resources=["*"],
-                conditions={
-                    "StringLike": {
-                        "aws:ResourceTag/WorkloadName": [
-                            "DO_NOT_DELETE_temp_IaCAnalyzer_*",
-                            "IaCAnalyzer_*",
-                        ]
-                    }
-                },
-            )
-        )
-        app_execute_role.add_to_policy(
-            iam.PolicyStatement(actions=["bedrock:InvokeModel"], resources=["*"])
-        )
-        app_execute_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=["s3:GetObject", "s3:ListBucket"],
-                resources=[
-                    f"arn:aws:s3:::{WA_DOCS_BUCKET_NAME}",
-                    f"arn:aws:s3:::{WA_DOCS_BUCKET_NAME}/*",
-                ],
-            )
-        )
-        app_execute_role.add_managed_policy(
-            iam.ManagedPolicy.from_aws_managed_policy_name("AmazonBedrockFullAccess")
-        )
-
-        # Adding DDB and S3 data store bucket permission for app_execute_role
-        app_execute_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=[
-                    "s3:PutObject",
-                    "s3:GetObject",
-                    "s3:DeleteObject",
-                    "s3:ListBucket",
-                ],
-                resources=[
-                    analysis_storage_bucket.bucket_arn,
-                    f"{analysis_storage_bucket.bucket_arn}/*",
-                ],
-            )
-        )
-
-        app_execute_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=[
-                    "dynamodb:PutItem",
-                    "dynamodb:GetItem",
-                    "dynamodb:DeleteItem",
-                    "dynamodb:Query",
-                    "dynamodb:UpdateItem",
-                ],
-                resources=[
-                    analysis_metadata_table.table_arn,
-                    f"{analysis_metadata_table.table_arn}/index/*",
-                ],
-            )
-        )
-
-        # Grant permissions to scan the lens metadata table
-        app_execute_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=[
-                    "dynamodb:Scan",
-                    "dynamodb:GetItem",
-                    "dynamodb:Query",
-                ],
-                resources=[
-                    lens_metadata_table.table_arn,
-                    f"{lens_metadata_table.table_arn}/index/*",
-                ],
-            )
-        )
-
-        # Create VPC to host the ECS cluster
-        vpc = ec2.Vpc(
-            self,
-            "ECSVpc",
-            ip_addresses=ec2.IpAddresses.cidr("10.0.0.0/16"),
-            max_azs=2,
-            nat_gateways=1,
-            subnet_configuration=[
-                ec2.SubnetConfiguration(
-                    name="public", subnet_type=ec2.SubnetType.PUBLIC
-                ),
-                ec2.SubnetConfiguration(
-                    name="private", subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-                ),
-            ],
-        )
-
-        # Capture the public subnets
-        public_subnets = vpc.select_subnets(subnet_type=ec2.SubnetType.PUBLIC)
-
-        # Create ECS Cluster
-        ecs_cluster = ecs.Cluster(self, "AppCluster", vpc=vpc, container_insights=True)
-
-        # Add ECS Service Discovery namespace
-        namespace = servicediscovery.PrivateDnsNamespace(
-            self, "ServiceDiscovery", name="internal", vpc=vpc
-        )
-
-        # Create security groups for frontend and backend
-        frontend_security_group = ec2.SecurityGroup(
-            self,
-            "FrontendSecurityGroup",
-            vpc=vpc,
-            description="Security group for frontend service",
-        )
-
-        backend_security_group = ec2.SecurityGroup(
-            self,
-            "BackendSecurityGroup",
-            vpc=vpc,
-            description="Security group for backend service",
-        )
-
-        # Create frontend service with ALB
-        if auth_config["enabled"]:
-            # Create HTTPS listener with authentication
-            certificate = aws_certificatemanager.Certificate.from_certificate_arn(
-                self, "ALBCertificate", auth_config["certificateArn"]
-            )
-
-            frontend_service = ecs_patterns.ApplicationLoadBalancedFargateService(
-                self,
-                "FrontendService",
-                cluster=ecs_cluster,
-                runtime_platform=ecs.RuntimePlatform(
-                    operating_system_family=ecs.OperatingSystemFamily.LINUX,
-                    cpu_architecture=architecture["fargate_architecture"],
-                ),
-                task_image_options=ecs_patterns.ApplicationLoadBalancedTaskImageOptions(
-                    image=frontend_container_image,
-                    container_port=8080,
-                    environment={
-                        # Use service discovery DNS name
-                        "VITE_API_URL": f"http://backend.internal:3000"
-                    },
-                ),
-                public_load_balancer=public_lb,
-                security_groups=[frontend_security_group],
-                certificate=certificate,
-                redirect_http=True,
-                ssl_policy=elbv2.SslPolicy.RECOMMENDED_TLS,
-            )
-
-            # Store reference to frontend target group
-            self.frontend_target_group = frontend_service.target_group
-
-            # Create Cognito resources once if using new Cognito
-            user_pool = None
-            client = None
-            domain = None
-            if auth_config["authType"] == "new-cognito":
-                user_pool = aws_cognito.UserPool(
-                    self,
-                    "WAAnalyzerUserPool",
-                    user_pool_name="WAAnalyzerUserPool",
-                    self_sign_up_enabled=False,
-                    sign_in_aliases=aws_cognito.SignInAliases(email=True),
-                    standard_attributes=aws_cognito.StandardAttributes(
-                        email=aws_cognito.StandardAttribute(required=True)
-                    ),
-                )
-
-                domain = user_pool.add_domain(
-                    "CognitoDomain",
-                    cognito_domain=aws_cognito.CognitoDomainOptions(
-                        domain_prefix=auth_config["cognito"]["domainPrefix"]
-                    ),
-                    managed_login_version=aws_cognito.ManagedLoginVersion.NEWER_MANAGED_LOGIN,
-                )
-
-                # Convert logoutUrl to array
-                logout_urls = (
-                    [auth_config["cognito"]["logoutUrl"]]
-                    if auth_config["cognito"]["logoutUrl"]
-                    else []
-                )
-
-                client = user_pool.add_client(
-                    "WAAnalyzerClient",
-                    generate_secret=True,
-                    o_auth=aws_cognito.OAuthSettings(
-                        flows=aws_cognito.OAuthFlows(authorization_code_grant=True),
-                        scopes=[aws_cognito.OAuthScope.OPENID],
-                        callback_urls=auth_config["cognito"]["callbackUrls"],
-                        logout_urls=logout_urls,
-                    ),
-                    auth_flows=aws_cognito.AuthFlow(user_password=True, user_srp=True),
-                    prevent_user_existence_errors=True,
-                )
-
-                # Create branding for the managed login UI
-                aws_cognito.CfnManagedLoginBranding(
-                    self,
-                    "WAAnalyzerManagedLoginBranding",
-                    user_pool_id=user_pool.user_pool_id,
-                    client_id=client.user_pool_client_id,
-                    use_cognito_provided_values=True,
-                )
-
-                # Update sign_out_url for new Cognito setup
-                sign_out_url = (
-                    f"https://{auth_config['cognito']['domainPrefix']}.auth.{Stack.of(self).region}.amazoncognito.com/logout?"
-                    f"client_id={client.user_pool_client_id}&"
-                    f"logout_uri={auth_config['cognito']['logoutUrl']}&"
-                    "response_type=code"
-                )
-
-            # Modify the default actions of the existing HTTPS listener
-            https_listener = frontend_service.listener
-
-            # Set the authenticate action as the default action
-            auth_action = self.create_alb_auth_action(
-                auth_config,
-                frontend_service.load_balancer.load_balancer_dns_name,
-                user_pool,
-                client,
-                domain,
-            )
-
-            # Remove any existing actions and add the auth action as the only action
-            https_listener.add_action("DefaultAuth", action=auth_action)
-        else:
-            # HTTP-only ALB creation
-            frontend_service = ecs_patterns.ApplicationLoadBalancedFargateService(
-                self,
-                "FrontendService",
-                cluster=ecs_cluster,
-                runtime_platform=ecs.RuntimePlatform(
-                    operating_system_family=ecs.OperatingSystemFamily.LINUX,
-                    cpu_architecture=architecture["fargate_architecture"],
-                ),
-                task_image_options=ecs_patterns.ApplicationLoadBalancedTaskImageOptions(
-                    image=frontend_container_image,
-                    container_port=8080,
-                    environment={
-                        # Use service discovery DNS name
-                        "VITE_API_URL": f"http://backend.internal:3000"
-                    },
-                ),
-                public_load_balancer=public_lb,
-                security_groups=[frontend_security_group],
-            )
-            # Store reference to frontend target group
-            self.frontend_target_group = frontend_service.target_group
-
-        # Set ALB idle timeout to 60 minutes
-        frontend_service.load_balancer.set_attribute(
-            "idle_timeout.timeout_seconds", "3600"
-        )
-
-        # Allow ALB to access frontend on port 8080
-        frontend_security_group.add_ingress_rule(
-            peer=frontend_service.load_balancer.connections.security_groups[
-                0
-            ],  # ALB security group
-            connection=ec2.Port.tcp(8080),
-            description="Allow ALB to access frontend",
-        )
-
-        # Allow frontend to access backend on port 3000
-        backend_security_group.add_ingress_rule(
-            peer=frontend_security_group,
-            connection=ec2.Port.tcp(3000),
-            description="Allow frontend to access backend",
-        )
-
-        # Get the ALB DNS name after frontend service is created
-        alb_dns = frontend_service.load_balancer.load_balancer_dns_name
-
-        # Configure health check for ALB
-        frontend_service.target_group.configure_health_check(path="/healthz")
-
-        # Create backend service with service discovery
-        backend_task_definition = ecs.FargateTaskDefinition(
-            self,
-            "BackendTaskDef",
-            runtime_platform=ecs.RuntimePlatform(
-                operating_system_family=ecs.OperatingSystemFamily.LINUX,
-                cpu_architecture=architecture["fargate_architecture"],
-            ),
-            task_role=app_execute_role,
-        )
-
-        backend_container = backend_task_definition.add_container(
-            "BackendContainer",
-            image=backend_container_image,
-            environment={
-                "WA_DOCS_S3_BUCKET": WA_DOCS_BUCKET_NAME,
-                "KNOWLEDGE_BASE_ID": KB_ID,
-                "MODEL_ID": model_id,
-                "AWS_REGION": Stack.of(self).region,
-                "FRONTEND_URL": f"http://{alb_dns}",
-                "AUTH_ENABLED": str(auth_config["enabled"]).lower(),
-                "AUTH_SIGN_OUT_URL": sign_out_url,
-            },
-            logging=ecs.LogDriver.aws_logs(stream_prefix="backend"),
-        )
-
-        backend_container.add_port_mappings(ecs.PortMapping(container_port=3000))
-
-        # Environment variables for the backend service when auth is enabled
-        backend_container.add_environment("STORAGE_ENABLED", "true")
-
-        backend_container.add_environment(
-            "ANALYSIS_STORAGE_BUCKET", analysis_storage_bucket.bucket_name
-        )
-        backend_container.add_environment(
-            "ANALYSIS_METADATA_TABLE", analysis_metadata_table.table_name
-        )
-        backend_container.add_environment(
-            "LENS_METADATA_TABLE", lens_metadata_table.table_name
-        )
-
-        # Create the backend service
-        backend_service = ecs.FargateService(
-            self,
-            "BackendService",
-            cluster=ecs_cluster,
-            task_definition=backend_task_definition,
-            vpc_subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-            ),
-            security_groups=[backend_security_group],
-        )
-
-        # Add service discovery
-        backend_service.enable_cloud_map(cloud_map_namespace=namespace, name="backend")
-
-        deployment_timestamp = int(time.time())
-
-        # Custom resource to trigger the KB Lambda synchronizer during deployment
-        kb_lambda_trigger_cr = cr.AwsCustomResource(
-            self,
-            "KbLambdaTrigger",
-            on_create=cr.AwsSdkCall(
-                service="Lambda",
-                action="invoke",
-                parameters={
-                    "FunctionName": kb_lambda_synchronizer.function_name,
-                    "InvocationType": "Event",
-                },
-                physical_resource_id=cr.PhysicalResourceId.of(
-                    f"KbLambdaSynchronizerTrigger-{deployment_timestamp}"
-                ),
-            ),
-            on_update=cr.AwsSdkCall(
-                service="Lambda",
-                action="invoke",
-                parameters={
-                    "FunctionName": kb_lambda_synchronizer.function_name,
-                    "InvocationType": "Event",
-                },
-                physical_resource_id=cr.PhysicalResourceId.of(
-                    f"KbLambdaSynchronizerTrigger-{deployment_timestamp}"
-                ),
-            ),
-            # Use explicit IAM policy statement instead of from_sdk_calls
-            policy=cr.AwsCustomResourcePolicy.from_statements(
-                [
-                    iam.PolicyStatement(
-                        actions=["lambda:InvokeFunction"],
-                        resources=[kb_lambda_synchronizer.function_arn],
-                    )
+# Add policy statements to the IAM role
+app_execute_role.add_to_policy(
+    iam.PolicyStatement(
+        actions=[
+            "wellarchitected:GetLensReview",
+            "wellarchitected:ListAnswers",
+            "wellarchitected:GetWorkload",
+            "wellarchitected:UpdateAnswer",
+            "wellarchitected:CreateMilestone",
+            "wellarchitected:GetLensReviewReport",
+            "wellarchitected:AssociateLenses",
+            "wellarchitected:ListWorkloads",
+        ],
+        resources=["*"],
+    )
+)
+app_execute_role.add_to_policy(
+    iam.PolicyStatement(
+        actions=[
+            "wellarchitected:CreateWorkload",
+            "wellarchitected:TagResource",
+        ],
+        resources=["*"],
+        conditions={
+            "StringLike": {
+                "aws:RequestTag/WorkloadName": [
+                    "DO_NOT_DELETE_temp_IaCAnalyzer_*",
+                    "IaCAnalyzer_*",
                 ]
-            ),
-        )
+            }
+        },
+    )
+)
+app_execute_role.add_to_policy(
+    iam.PolicyStatement(
+        actions=[
+            "wellarchitected:DeleteWorkload",
+        ],
+        resources=["*"],
+        conditions={
+            "StringLike": {
+                "aws:ResourceTag/WorkloadName": [
+                    "DO_NOT_DELETE_temp_IaCAnalyzer_*",
+                    "IaCAnalyzer_*",
+                ]
+            }
+        },
+    )
+)
+app_execute_role.add_to_policy(
+    iam.PolicyStatement(actions=["bedrock:InvokeModel"], resources=["*"])
+)
+app_execute_role.add_to_policy(
+    iam.PolicyStatement(
+        actions=["s3:GetObject", "s3:ListBucket"],
+        resources=[
+            f"arn:aws:s3:::{WA_DOCS_BUCKET_NAME}",
+            f"arn:aws:s3:::{WA_DOCS_BUCKET_NAME}/*",
+        ],
+    )
+)
+app_execute_role.add_managed_policy(
+    iam.ManagedPolicy.from_aws_managed_policy_name("AmazonBedrockFullAccess")
+)
 
-        # Migration Lambda function for transitioning from single-lens to multi-lens storage structure
-        # The new multi-lenses support introduced on 14-April-2025 is a breaking change. This function is meant to support a seamless transition from previous single-lens (wellarchitected) storage structure to the new multi-lens structure.
-        # The Lambda will only run at cdk deployment time once and only for deployments where the old single-lens structure is detected.
-        migration_lambda = lambda_.Function(
-            self,
-            "MigrationLambda",
-            runtime=lambda_.Runtime.PYTHON_3_12,
-            handler="migration.handler",
-            code=lambda_.Code.from_asset(
-                "ecs_fargate_app/lambda_migration",
-                bundling=cdk.BundlingOptions(
-                    image=lambda_.Runtime.PYTHON_3_12.bundling_image,
-                    command=[
-                        "bash",
-                        "-c",
-                        "pip install --no-cache -r requirements.txt -t /asset-output && cp -au . /asset-output",
-                    ],
-                ),
-            ),
+# Adding DDB and S3 data store bucket permission for app_execute_role
+app_execute_role.add_to_policy(
+    iam.PolicyStatement(
+        actions=[
+            "s3:PutObject",
+            "s3:GetObject",
+            "s3:DeleteObject",
+            "s3:ListBucket",
+        ],
+        resources=[
+            analysis_storage_bucket.bucket_arn,
+            f"{analysis_storage_bucket.bucket_arn}/*",
+        ],
+    )
+)
+
+app_execute_role.add_to_policy(
+    iam.PolicyStatement(
+        actions=[
+            "dynamodb:PutItem",
+            "dynamodb:GetItem",
+            "dynamodb:DeleteItem",
+            "dynamodb:Query",
+            "dynamodb:UpdateItem",
+        ],
+        resources=[
+            analysis_metadata_table.table_arn,
+            f"{analysis_metadata_table.table_arn}/index/*",
+        ],
+    )
+)
+
+# Grant permissions to scan the lens metadata table
+app_execute_role.add_to_policy(
+    iam.PolicyStatement(
+        actions=[
+            "dynamodb:Scan",
+            "dynamodb:GetItem",
+            "dynamodb:Query",
+        ],
+        resources=[
+            lens_metadata_table.table_arn,
+            f"{lens_metadata_table.table_arn}/index/*",
+        ],
+    )
+)
+
+# Create VPC to host the ECS cluster
+vpc = ec2.Vpc(
+    self,
+    "ECSVpc",
+    ip_addresses=ec2.IpAddresses.cidr("10.0.0.0/16"),
+    max_azs=2,
+    nat_gateways=1,
+    subnet_configuration=[
+        ec2.SubnetConfiguration(
+            name="public", subnet_type=ec2.SubnetType.PUBLIC
+        ),
+        ec2.SubnetConfiguration(
+            name="private", subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
+        ),
+    ],
+)
+
+# Capture the public subnets
+public_subnets = vpc.select_subnets(subnet_type=ec2.SubnetType.PUBLIC)
+
+# Create ECS Cluster
+ecs_cluster = ecs.Cluster(self, "AppCluster", vpc=vpc, container_insights=True)
+
+# Add ECS Service Discovery namespace
+namespace = servicediscovery.PrivateDnsNamespace(
+    self, "ServiceDiscovery", name="internal", vpc=vpc
+)
+
+# Create security groups for frontend and backend
+frontend_security_group = ec2.SecurityGroup(
+    self,
+    "FrontendSecurityGroup",
+    vpc=vpc,
+    description="Security group for frontend service",
+)
+
+backend_security_group = ec2.SecurityGroup(
+    self,
+    "BackendSecurityGroup",
+    vpc=vpc,
+    description="Security group for backend service",
+)
+
+# Create frontend service with ALB
+if auth_config["enabled"]:
+    # Create HTTPS listener with authentication
+    certificate = aws_certificatemanager.Certificate.from_certificate_arn(
+        self, "ALBCertificate", auth_config["certificateArn"]
+    )
+
+    frontend_service = ecs_patterns.ApplicationLoadBalancedFargateService(
+        self,
+        "FrontendService",
+        cluster=ecs_cluster,
+        runtime_platform=ecs.RuntimePlatform(
+            operating_system_family=ecs.OperatingSystemFamily.LINUX,
+            cpu_architecture=architecture["fargate_architecture"],
+        ),
+        task_image_options=ecs_patterns.ApplicationLoadBalancedTaskImageOptions(
+            image=frontend_container_image,
+            container_port=8080,
             environment={
-                "ANALYSIS_METADATA_TABLE": analysis_metadata_table.table_name,
-                "ANALYSIS_STORAGE_BUCKET": analysis_storage_bucket.bucket_name,
-                "WA_DOCS_BUCKET_NAME": wafrReferenceDocsBucket.bucket_name,
+                # Use service discovery DNS name
+                "VITE_API_URL": f"http://backend.internal:3000"
             },
-            timeout=Duration.minutes(15),
-        )
+        ),
+        public_load_balancer=public_lb,
+        security_groups=[frontend_security_group],
+        certificate=certificate,
+        redirect_http=True,
+        ssl_policy=elbv2.SslPolicy.RECOMMENDED_TLS,
+    )
 
-        # Grant DynamoDB permissions to migration Lambda
-        analysis_metadata_table.grant_read_write_data(migration_lambda)
+    # Store reference to frontend target group
+    self.frontend_target_group = frontend_service.target_group
 
-        # Grant S3 permissions for both buckets to migration Lambda
-        analysis_storage_bucket.grant_read_write(migration_lambda)
-        wafrReferenceDocsBucket.grant_read_write(migration_lambda)
-
-        # Create a custom resource to trigger migration Lambda after KB synchronization
-        migration_trigger_cr = cr.AwsCustomResource(
+    # Create Cognito resources once if using new Cognito
+    user_pool = None
+    client = None
+    domain = None
+    if auth_config["authType"] == "new-cognito":
+        user_pool = aws_cognito.UserPool(
             self,
-            "MigrationTrigger",
-            on_create=cr.AwsSdkCall(
-                service="Lambda",
-                action="invoke",
-                parameters={
-                    "FunctionName": migration_lambda.function_name,
-                    "InvocationType": "Event",
-                },
-                physical_resource_id=cr.PhysicalResourceId.of("MigrationLambdaTrigger"),
+            "WAAnalyzerUserPool",
+            user_pool_name="WAAnalyzerUserPool",
+            self_sign_up_enabled=False,
+            sign_in_aliases=aws_cognito.SignInAliases(email=True),
+            standard_attributes=aws_cognito.StandardAttributes(
+                email=aws_cognito.StandardAttribute(required=True)
             ),
-            policy=cr.AwsCustomResourcePolicy.from_sdk_calls(
-                resources=cr.AwsCustomResourcePolicy.ANY_RESOURCE
+        )
+
+        domain = user_pool.add_domain(
+            "CognitoDomain",
+            cognito_domain=aws_cognito.CognitoDomainOptions(
+                domain_prefix=auth_config["cognito"]["domainPrefix"]
             ),
+            managed_login_version=aws_cognito.ManagedLoginVersion.NEWER_MANAGED_LOGIN,
         )
 
-        migration_lambda.grant_invoke(migration_trigger_cr)
+        # Convert logoutUrl to array
+        logout_urls = (
+            [auth_config["cognito"]["logoutUrl"]]
+            if auth_config["cognito"]["logoutUrl"]
+            else []
+        )
 
-        # Conditionally create stack cleanup resources if auto_cleanup is enabled
-        if auto_cleanup:
-            self.create_stack_cleanup_resources()
+        client = user_pool.add_client(
+            "WAAnalyzerClient",
+            generate_secret=True,
+            o_auth=aws_cognito.OAuthSettings(
+                flows=aws_cognito.OAuthFlows(authorization_code_grant=True),
+                scopes=[aws_cognito.OAuthScope.OPENID],
+                callback_urls=auth_config["cognito"]["callbackUrls"],
+                logout_urls=logout_urls,
+            ),
+            auth_flows=aws_cognito.AuthFlow(user_password=True, user_srp=True),
+            prevent_user_existence_errors=True,
+        )
 
-        # Output the frontend ALB DNS name
-        cdk.CfnOutput(
+        # Create branding for the managed login UI
+        aws_cognito.CfnManagedLoginBranding(
             self,
-            "FrontendURL",
-            value=frontend_service.load_balancer.load_balancer_dns_name,
-            description="Frontend application URL",
+            "WAAnalyzerManagedLoginBranding",
+            user_pool_id=user_pool.user_pool_id,
+            client_id=client.user_pool_client_id,
+            use_cognito_provided_values=True,
         )
 
-        # Output the ID of the Bedrock knowledge base
-        cdk.CfnOutput(
-            self,
-            "KnowledgeBaseID",
-            value=KB_ID,
-            description="ID of the Bedrock knowledge base",
+        # Update sign_out_url for new Cognito setup
+        sign_out_url = (
+            f"https://{auth_config['cognito']['domainPrefix']}.auth.{Stack.of(self).region}.amazoncognito.com/logout?"
+            f"client_id={client.user_pool_client_id}&"
+            f"logout_uri={auth_config['cognito']['logoutUrl']}&"
+            "response_type=code"
         )
 
-        # Output S3 bucket (Source of Bedrock knowledge base) with well-architected documents.
-        cdk.CfnOutput(
-            self,
-            "WellArchitectedDocsS3Bucket",
-            value=wafrReferenceDocsBucket.bucket_name,
-            description="S3 bucket (Source of Bedrock knowledge base) with well-architected documents.",
-        )
+    # Modify the default actions of the existing HTTPS listener
+    https_listener = frontend_service.listener
 
-        # Output the VPC ID
-        cdk.CfnOutput(
-            self,
-            "VpcId",
-            value=vpc.vpc_id,
-            description="ID of the VPC where the private ALB is created",
-        )
+    # Set the authenticate action as the default action
+    auth_action = self.create_alb_auth_action(
+        auth_config,
+        frontend_service.load_balancer.load_balancer_dns_name,
+        user_pool,
+        client,
+        domain,
+    )
 
-        # Output the ID of the first public subnet
-        cdk.CfnOutput(
-            self,
-            "PublicSubnetId",
-            value=public_subnets.subnet_ids[0],
-            description="ID of the public subnet created in the VPC",
-        )
+    # Remove any existing actions and add the auth action as the only action
+    https_listener.add_action("DefaultAuth", action=auth_action)
+else:
+    # HTTP-only ALB creation
+    frontend_service = ecs_patterns.ApplicationLoadBalancedFargateService(
+        self,
+        "FrontendService",
+        cluster=ecs_cluster,
+        runtime_platform=ecs.RuntimePlatform(
+            operating_system_family=ecs.OperatingSystemFamily.LINUX,
+            cpu_architecture=architecture["fargate_architecture"],
+        ),
+        task_image_options=ecs_patterns.ApplicationLoadBalancedTaskImageOptions(
+            image=frontend_container_image,
+            container_port=8080,
+            environment={
+                # Use service discovery DNS name
+                "VITE_API_URL": f"http://backend.internal:3000"
+            },
+        ),
+        public_load_balancer=public_lb,
+        security_groups=[frontend_security_group],
+    )
+    # Store reference to frontend target group
+    self.frontend_target_group = frontend_service.target_group
 
-        # Add authentication configuration outputs
-        if auth_config["enabled"]:
-            cdk.CfnOutput(
-                self,
-                "AuthenticationType",
-                value=auth_config["authType"],
-                description="Type of authentication configured",
+# Set ALB idle timeout to 60 minutes
+frontend_service.load_balancer.set_attribute(
+    "idle_timeout.timeout_seconds", "3600"
+)
+
+# Allow ALB to access frontend on port 8080
+frontend_security_group.add_ingress_rule(
+    peer=frontend_service.load_balancer.connections.security_groups[
+        0
+    ],  # ALB security group
+    connection=ec2.Port.tcp(8080),
+    description="Allow ALB to access frontend",
+)
+
+# Allow frontend to access backend on port 3000
+backend_security_group.add_ingress_rule(
+    peer=frontend_security_group,
+    connection=ec2.Port.tcp(3000),
+    description="Allow frontend to access backend",
+)
+
+# Get the ALB DNS name after frontend service is created
+alb_dns = frontend_service.load_balancer.load_balancer_dns_name
+
+# Configure health check for ALB
+frontend_service.target_group.configure_health_check(path="/healthz")
+
+# Create backend service with service discovery
+backend_task_definition = ecs.FargateTaskDefinition(
+    self,
+    "BackendTaskDef",
+    runtime_platform=ecs.RuntimePlatform(
+        operating_system_family=ecs.OperatingSystemFamily.LINUX,
+        cpu_architecture=architecture["fargate_architecture"],
+    ),
+    task_role=app_execute_role,
+)
+
+backend_container = backend_task_definition.add_container(
+    "BackendContainer",
+    image=backend_container_image,
+    environment={
+        "WA_DOCS_S3_BUCKET": WA_DOCS_BUCKET_NAME,
+        "KNOWLEDGE_BASE_ID": KB_ID,
+        "MODEL_ID": model_id,
+        "AWS_REGION": Stack.of(self).region,
+        "FRONTEND_URL": f"http://{alb_dns}",
+        "AUTH_ENABLED": str(auth_config["enabled"]).lower(),
+        "AUTH_SIGN_OUT_URL": sign_out_url,
+    },
+    logging=ecs.LogDriver.aws_logs(stream_prefix="backend"),
+)
+
+backend_container.add_port_mappings(ecs.PortMapping(container_port=3000))
+
+# Environment variables for the backend service when auth is enabled
+backend_container.add_environment("STORAGE_ENABLED", "true")
+
+backend_container.add_environment(
+    "ANALYSIS_STORAGE_BUCKET", analysis_storage_bucket.bucket_name
+)
+backend_container.add_environment(
+    "ANALYSIS_METADATA_TABLE", analysis_metadata_table.table_name
+)
+backend_container.add_environment(
+    "LENS_METADATA_TABLE", lens_metadata_table.table_name
+)
+
+# Create the backend service
+backend_service = ecs.FargateService(
+    self,
+    "BackendService",
+    cluster=ecs_cluster,
+    task_definition=backend_task_definition,
+    vpc_subnets=ec2.SubnetSelection(
+        subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
+    ),
+    security_groups=[backend_security_group],
+)
+
+# Add service discovery
+backend_service.enable_cloud_map(cloud_map_namespace=namespace, name="backend")
+
+deployment_timestamp = int(time.time())
+
+# Custom resource to trigger the KB Lambda synchronizer during deployment
+kb_lambda_trigger_cr = cr.AwsCustomResource(
+    self,
+    "KbLambdaTrigger",
+    on_create=cr.AwsSdkCall(
+        service="Lambda",
+        action="invoke",
+        parameters={
+            "FunctionName": kb_lambda_synchronizer.function_name,
+            "InvocationType": "Event",
+        },
+        physical_resource_id=cr.PhysicalResourceId.of(
+            f"KbLambdaSynchronizerTrigger-{deployment_timestamp}"
+        ),
+    ),
+    on_update=cr.AwsSdkCall(
+        service="Lambda",
+        action="invoke",
+        parameters={
+            "FunctionName": kb_lambda_synchronizer.function_name,
+            "InvocationType": "Event",
+        },
+        physical_resource_id=cr.PhysicalResourceId.of(
+            f"KbLambdaSynchronizerTrigger-{deployment_timestamp}"
+        ),
+    ),
+    # Use explicit IAM policy statement instead of from_sdk_calls
+    policy=cr.AwsCustomResourcePolicy.from_statements(
+        [
+            iam.PolicyStatement(
+                actions=["lambda:InvokeFunction"],
+                resources=[kb_lambda_synchronizer.function_arn],
             )
+        ]
+    ),
+)
 
-            if auth_config["authType"] in ["new-cognito", "existing-cognito"]:
-                cdk.CfnOutput(
-                    self,
-                    "CognitoDomain",
-                    value=(
-                        f"{auth_config['cognito']['domainPrefix']}.auth.{self.region}.amazoncognito.com"
-                        if auth_config["authType"] == "new-cognito"
-                        else auth_config["cognito"]["domain"]
-                    ),
-                    description="Cognito domain for authentication",
-                )
+# Migration Lambda function for transitioning from single-lens to multi-lens storage structure
+# The new multi-lenses support introduced on 14-April-2025 is a breaking change. This function is meant to support a seamless transition from previous single-lens (wellarchitected) storage structure to the new multi-lens structure.
+# The Lambda will only run at cdk deployment time once and only for deployments where the old single-lens structure is detected.
+migration_lambda = lambda_.Function(
+    self,
+    "MigrationLambda",
+    runtime=lambda_.Runtime.PYTHON_3_12,
+    handler="migration.handler",
+    code=lambda_.Code.from_asset(
+        "ecs_fargate_app/lambda_migration",
+        bundling=cdk.BundlingOptions(
+            image=lambda_.Runtime.PYTHON_3_12.bundling_image,
+            command=[
+                "bash",
+                "-c",
+                "pip install --no-cache -r requirements.txt -t /asset-output && cp -au . /asset-output",
+            ],
+        ),
+    ),
+    environment={
+        "ANALYSIS_METADATA_TABLE": analysis_metadata_table.table_name,
+        "ANALYSIS_STORAGE_BUCKET": analysis_storage_bucket.bucket_name,
+        "WA_DOCS_BUCKET_NAME": wafrReferenceDocsBucket.bucket_name,
+    },
+    timeout=Duration.minutes(15),
+)
 
-        # Outputs for the storage resources
+# Grant DynamoDB permissions to migration Lambda
+analysis_metadata_table.grant_read_write_data(migration_lambda)
+
+# Grant S3 permissions for both buckets to migration Lambda
+analysis_storage_bucket.grant_read_write(migration_lambda)
+wafrReferenceDocsBucket.grant_read_write(migration_lambda)
+
+# Create a custom resource to trigger migration Lambda after KB synchronization
+migration_trigger_cr = cr.AwsCustomResource(
+    self,
+    "MigrationTrigger",
+    on_create=cr.AwsSdkCall(
+        service="Lambda",
+        action="invoke",
+        parameters={
+            "FunctionName": migration_lambda.function_name,
+            "InvocationType": "Event",
+        },
+        physical_resource_id=cr.PhysicalResourceId.of("MigrationLambdaTrigger"),
+    ),
+    policy=cr.AwsCustomResourcePolicy.from_sdk_calls(
+        resources=cr.AwsCustomResourcePolicy.ANY_RESOURCE
+    ),
+)
+
+migration_lambda.grant_invoke(migration_trigger_cr)
+
+# Conditionally create stack cleanup resources if auto_cleanup is enabled
+if auto_cleanup:
+    self.create_stack_cleanup_resources()
+
+# Output the frontend ALB DNS name
+cdk.CfnOutput(
+    self,
+    "FrontendURL",
+    value=frontend_service.load_balancer.load_balancer_dns_name,
+    description="Frontend application URL",
+)
+
+# Output the ID of the Bedrock knowledge base
+cdk.CfnOutput(
+    self,
+    "KnowledgeBaseID",
+    value=KB_ID,
+    description="ID of the Bedrock knowledge base",
+)
+
+# Output S3 bucket (Source of Bedrock knowledge base) with well-architected documents.
+cdk.CfnOutput(
+    self,
+    "WellArchitectedDocsS3Bucket",
+    value=wafrReferenceDocsBucket.bucket_name,
+    description="S3 bucket (Source of Bedrock knowledge base) with well-architected documents.",
+)
+
+# Output the VPC ID
+cdk.CfnOutput(
+    self,
+    "VpcId",
+    value=vpc.vpc_id,
+    description="ID of the VPC where the private ALB is created",
+)
+
+# Output the ID of the first public subnet
+cdk.CfnOutput(
+    self,
+    "PublicSubnetId",
+    value=public_subnets.subnet_ids[0],
+    description="ID of the public subnet created in the VPC",
+)
+
+# Add authentication configuration outputs
+if auth_config["enabled"]:
+    cdk.CfnOutput(
+        self,
+        "AuthenticationType",
+        value=auth_config["authType"],
+        description="Type of authentication configured",
+    )
+
+    if auth_config["authType"] in ["new-cognito", "existing-cognito"]:
         cdk.CfnOutput(
             self,
-            "AnalysisStorageBucketName",
-            value=analysis_storage_bucket.bucket_name,
-            description="S3 bucket for storing analysis results",
+            "CognitoDomain",
+            value=(
+                f"{auth_config['cognito']['domainPrefix']}.auth.{self.region}.amazoncognito.com"
+                if auth_config["authType"] == "new-cognito"
+                else auth_config["cognito"]["domain"]
+            ),
+            description="Cognito domain for authentication",
         )
 
-        cdk.CfnOutput(
-            self,
-            "AnalysisMetadataTableName",
-            value=analysis_metadata_table.table_name,
-            description="DynamoDB table for analysis metadata",
-        )
+# Outputs for the storage resources
+cdk.CfnOutput(
+    self,
+    "AnalysisStorageBucketName",
+    value=analysis_storage_bucket.bucket_name,
+    description="S3 bucket for storing analysis results",
+)
 
-        # Output lens metadata table name
-        cdk.CfnOutput(
-            self,
-            "LensMetadataTableName",
-            value=lens_metadata_table.table_name,
-            description="DynamoDB table for lens metadata",
-        )
+cdk.CfnOutput(
+    self,
+    "AnalysisMetadataTableName",
+    value=analysis_metadata_table.table_name,
+    description="DynamoDB table for analysis metadata",
+)
 
-        # Node dependencies
-        kbDataSource.node.add_dependency(wafrReferenceDocsBucket)
-        ingestion_job_cr.node.add_dependency(kb)
-        kb_lambda_synchronizer.node.add_dependency(kb)
-        kb_lambda_synchronizer.node.add_dependency(kbDataSource)
-        kb_lambda_synchronizer.node.add_dependency(wafrReferenceDocsBucket)
-        kb_lambda_synchronizer.node.add_dependency(workload_cr)
+# Output lens metadata table name
+cdk.CfnOutput(
+    self,
+    "LensMetadataTableName",
+    value=lens_metadata_table.table_name,
+    description="DynamoDB table for lens metadata",
+)
 
-        kb_lambda_trigger_cr.node.add_dependency(kb_lambda_synchronizer)
-        kb_lambda_trigger_cr.node.add_dependency(kb)
-        kb_lambda_trigger_cr.node.add_dependency(kbDataSource)
-        kb_lambda_trigger_cr.node.add_dependency(wafrReferenceDocsBucket)
-        kb_lambda_trigger_cr.node.add_dependency(workload_cr)
+# Node dependencies
+kbDataSource.node.add_dependency(wafrReferenceDocsBucket)
+ingestion_job_cr.node.add_dependency(kb)
+kb_lambda_synchronizer.node.add_dependency(kb)
+kb_lambda_synchronizer.node.add_dependency(kbDataSource)
+kb_lambda_synchronizer.node.add_dependency(wafrReferenceDocsBucket)
+kb_lambda_synchronizer.node.add_dependency(workload_cr)
 
-        migration_trigger_cr.node.add_dependency(kb_lambda_trigger_cr)
-        migration_lambda.node.add_dependency(analysis_metadata_table)
-        migration_lambda.node.add_dependency(analysis_storage_bucket)
-        migration_lambda.node.add_dependency(wafrReferenceDocsBucket)
+kb_lambda_trigger_cr.node.add_dependency(kb_lambda_synchronizer)
+kb_lambda_trigger_cr.node.add_dependency(kb)
+kb_lambda_trigger_cr.node.add_dependency(kbDataSource)
+kb_lambda_trigger_cr.node.add_dependency(wafrReferenceDocsBucket)
+kb_lambda_trigger_cr.node.add_dependency(workload_cr)
+
+migration_trigger_cr.node.add_dependency(kb_lambda_trigger_cr)
+migration_lambda.node.add_dependency(analysis_metadata_table)
+migration_lambda.node.add_dependency(analysis_storage_bucket)
+migration_lambda.node.add_dependency(wafrReferenceDocsBucket)
+
 
