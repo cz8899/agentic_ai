@@ -1,0 +1,8 @@
+{
+  "app": "python3 app.py",
+  "context": {
+    "frontend_image_uri": "025359952273.dkr.ecr.us-east-1.amazonaws.com/wa-frontend:latest",
+    "backend_image_uri": "025359952273.dkr.ecr.us-east-1.amazonaws.com/wa-backend:latest",
+    "permissionBoundaryArn": "arn:aws:iam::025359952273:policy/CSEStandardPermissions"
+  }
+}
