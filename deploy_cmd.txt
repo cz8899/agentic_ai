@@ -1,7 +1,8 @@
 
 # from repo root (VDI)
-python3 -m venv .venv
-source .venv/bin/activate
+python -m venv .venv
+#source .venv/bin/activate
+.\venv\Scripts\Activate.ps1
 pip install -r ecs_fargate_app/lambda_stack_cleanup/requirements.txt -t ecs_fargate_app/lambda_stack_cleanup
 pip install -r ecs_fargate_app/lambda_kb_synchronizer/requirements.txt -t ecs_fargate_app/lambda_kb_synchronizer
 pip install -r ecs_fargate_app/lambda_migration/requirements.txt -t ecs_fargate_app/lambda_migration
