@@ -368,24 +368,16 @@ class WAGenAIStack(Stack):
         random_id = str(uuid.uuid4())[:8]  # First 8 characters of a UUID
 
         platform_mapping = {
-            "x86_64": {
-                "fargate_architecture": ecs.CpuArchitecture.X86_64,
-                "build_architecture": Platform.LINUX_AMD64,
-                "build_architecture_argument": "amd64",
-            },
-            "arm64": {
-                "fargate_architecture": ecs.CpuArchitecture.ARM64,
-                "build_architecture": Platform.LINUX_ARM64,
-                "build_architecture_argument": "arm64",
-            },
-            "aarch64": {
-                "fargate_architecture": ecs.CpuArchitecture.ARM64,
-                "build_architecture": Platform.LINUX_ARM64,
-                "build_architecture_argument": "arm64",
-            },
+            "x86_64": "LINUX_AMD64",
+            "AMD64": "LINUX_AMD64",   # Windows returns AMD64
+            "arm64": "LINUX_ARM64",
+            "aarch64": "LINUX_ARM64", # Some Linux distros return aarch64
         }
-        # Get architecture from platform (depending the machine that runs CDK)
-        architecture = platform_mapping[platform.machine()]
+        
+        arch = platform.machine()
+        architecture = platform_mapping.get(arch)
+        if not architecture:
+            raise ValueError(f"Unsupported platform architecture: {arch}")
 
         # Creates Bedrock KB using the generative_ai_cdk_constructs
         kb = bedrock.KnowledgeBase(
@@ -1246,3 +1238,4 @@ else:
         migration_lambda.node.add_dependency(analysis_metadata_table)
         migration_lambda.node.add_dependency(analysis_storage_bucket)
         migration_lambda.node.add_dependency(wafrReferenceDocsBucket)
+
