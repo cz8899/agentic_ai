@@ -1,0 +1,20 @@
+
+# from repo root (VDI)
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r ecs_fargate_app/lambda_stack_cleanup/requirements.txt -t ecs_fargate_app/lambda_stack_cleanup
+pip install -r ecs_fargate_app/lambda_kb_synchronizer/requirements.txt -t ecs_fargate_app/lambda_kb_synchronizer
+pip install -r ecs_fargate_app/lambda_migration/requirements.txt -t ecs_fargate_app/lambda_migration
+
+
+# show remaining bundling lines
+grep -n "BundlingOptions" -R ecs_fargate_app || true
+# show remaining DockerImageAsset
+grep -n "DockerImageAsset" -R ecs_fargate_app || true
+
+
+
+cdk deploy \
+ -c frontend_image_uri=025359952273.dkr.ecr.us-east-1.amazonaws.com/wa-frontend:latest \
+ -c backend_image_uri=025359952273.dkr.ecr.us-east-1.amazonaws.com/wa-backend:latest \
+ -c permissionBoundaryArn=arn:aws:iam::025359952273:policy/CSEStandardPermissions
